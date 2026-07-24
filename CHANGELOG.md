@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Updated `.gitignore` to exclude generated Office files and compiled Python
 
+## [2.3.0] - 2026-07-24
+
+### Added
+- **Text formatting** — `_format_text()` function that automatically normalizes all generated document text:
+  - Replaces em dashes (—) with regular hyphens (-)
+  - Applies sentence case (first letter of each sentence uppercase, rest lowercase)
+  - Preserves acronyms (API, PDF, HTML, CSS, JSON, SQL, AI, UI, UX, URL, etc.)
+  - Capitalizes first letter after each period
+  - Preserves Excel formulas (values starting with `=`)
+- Applied to all three generators: `generate_document`, `generate_slides`, `generate_spreadsheet`
+
 ## [2.2.0] - 2026-07-23
 
 ### Added

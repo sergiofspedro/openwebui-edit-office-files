@@ -233,6 +233,48 @@ def _xls_to_xlsx(xls_data: bytes) -> bytes:
     return out.read()
 
 
+def _format_text(text: str) -> str:
+    """Apply consistent text formatting: normalize dashes, sentence case, preserve acronyms."""
+    if not isinstance(text, str) or not text or text.startswith('='):
+        return text
+    
+    # 1. Normalize dashes
+    text = text.replace('\u2014', '-').replace('\u2015', '-').replace('\u2013', '-')
+    
+    # 2. Split into sentences and apply sentence case
+    acronyms = {'API', 'PDF', 'HTML', 'CSS', 'JSON', 'SQL', 'AI', 'UI', 'UX', 'ID', 'URL', 'HTTP', 'HTTPS', 'FTP', 'SSH', 'DNS', 'IP', 'TCP', 'UDP', 'SSL', 'TLS', 'REST', 'CRUD', 'YAML', 'XML', 'SVG', 'PNG', 'JPG', 'GIF', 'CSV', 'DOCX', 'PPTX', 'XLSX', 'DOC', 'PPT', 'XLS', 'ISO', 'RGB', 'CMYK', 'PHP', 'NPM', 'YARN', 'CLI', 'GUI', 'IDE', 'SDK', 'JDK', 'JRE', 'JVM', 'DB', 'SQLite', 'MySQL', 'NoSQL', 'OAuth', 'JWT', 'CORS', 'MVC', 'MVP', 'MVVM', 'SPA', 'PWA', 'SSR', 'CSR', 'SSG', 'ISR', 'CDN', 'DHCP', 'NAT', 'VPN', 'LAN', 'WAN', 'MAC', 'BIOS', 'UEFI', 'GPT', 'MBR', 'RAID', 'NAS', 'SAN', 'AWS', 'GCP', 'Azure', 'SaaS', 'PaaS', 'IaaS', 'FaaS', 'CaaS', 'K8s', 'Docker', 'Kubernetes'}
+    
+    import re as _re
+    
+    # Protect acronyms with placeholders (longest first to avoid partial matches)
+    acronym_map = {}
+    for i, acro in enumerate(sorted(acronyms, key=len, reverse=True)):
+        placeholder = f'\x00{i:04d}\x00'
+        pattern = _re.compile(r'(?<![a-zA-Z])' + _re.escape(acro) + r'(?![a-zA-Z])', _re.IGNORECASE)
+        text = pattern.sub(placeholder, text)
+        acronym_map[placeholder] = acro
+    
+    # Sentence case
+    sentences = _re.split(r'(?<=[.!?])\s+', text)
+    formatted_sentences = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        s = s.lower()
+        if s and s[0].isalpha():
+            s = s[0].upper() + s[1:]
+        formatted_sentences.append(s)
+    
+    text = ' '.join(formatted_sentences)
+    
+    # Restore acronyms
+    for placeholder, acro in acronym_map.items():
+        text = text.replace(placeholder, acro)
+    
+    return text
+
+
 # =========================================================================
 class Tools:
     class Valves:
@@ -1082,7 +1124,7 @@ class Tools:
                 h_match = _re.match(r'^(#{1,3})\s+(.*)', line)
                 if h_match:
                     lvl = len(h_match.group(1))
-                    heading = doc.add_heading(h_match.group(2), level=lvl)
+                    heading = doc.add_heading(_format_text(h_match.group(2)), level=lvl)
                     heading.runs[0].font.color.rgb = RGBColor(r, g, b) if lvl <= 2 else RGBColor(0, 0, 0)
                     continue
                 if line.startswith('::: callout'):
@@ -1110,7 +1152,7 @@ class Tools:
                 if line.startswith(':::') or line == ':::':
                     continue
                 if line:
-                    doc.add_paragraph(line)
+                    doc.add_paragraph(_format_text(line))
             
             out = io.BytesIO()
             doc.save(out)
@@ -1171,7 +1213,7 @@ class Tools:
                 if layout == 'cover':
                     tb = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11), Inches(2))
                     p = tb.text_frame.paragraphs[0]
-                    p.text = stitle
+                    p.text = _format_text(stitle)
                     p.font.size = Pt(44)
                     p.font.color.rgb = RGBColor(255, 255, 255)
                     p.font.bold = True
@@ -1187,7 +1229,7 @@ class Tools:
                     if 'subtitle' in ss:
                         tb2 = slide.shapes.add_textbox(Inches(2), Inches(5), Inches(9), Inches(1))
                         p2 = tb2.text_frame.paragraphs[0]
-                        p2.text = ss['subtitle']
+                        p2.text = _format_text(ss['subtitle'])
                         p2.font.size = Pt(18)
                         p2.font.color.rgb = RGBColor(200, 200, 200)
                         p2.alignment = PP_ALIGN.CENTER
@@ -1201,19 +1243,19 @@ class Tools:
                         shape.line.fill.background()
                         tf = shape.text_frame
                         p = tf.paragraphs[0]
-                        p.text = str(stat.get('value', ''))
+                        p.text = _format_text(str(stat.get('value', '')))
                         p.font.size = Pt(32)
                         p.font.bold = True
                         p.font.color.rgb = RGBColor(r, g, b)
                         p.alignment = PP_ALIGN.CENTER
                         p2 = tf.add_paragraph()
-                        p2.text = stat.get('label', '')
+                        p2.text = _format_text(stat.get('label', ''))
                         p2.font.size = Pt(12)
                         p2.font.color.rgb = RGBColor(100, 100, 100)
                         p2.alignment = PP_ALIGN.CENTER
                         if 'change' in stat:
                             p3 = tf.add_paragraph()
-                            p3.text = stat['change']
+                            p3.text = _format_text(stat['change'])
                             p3.font.size = Pt(14)
                             p3.font.color.rgb = RGBColor(76, 175, 80) if '+' in stat['change'] else RGBColor(244, 67, 54)
                             p3.alignment = PP_ALIGN.CENTER
@@ -1237,7 +1279,7 @@ class Tools:
                 elif layout == 'title_bullets':
                     tb = slide.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1.2))
                     p = tb.text_frame.paragraphs[0]
-                    p.text = stitle
+                    p.text = _format_text(stitle)
                     p.font.size = Pt(36)
                     p.font.color.rgb = RGBColor(255, 255, 255)
                     p.font.bold = True
@@ -1247,21 +1289,21 @@ class Tools:
                     if body:
                         tb2 = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(5))
                         p2 = tb2.text_frame.paragraphs[0]
-                        p2.text = body
+                        p2.text = _format_text(body)
                         p2.font.size = Pt(18)
                         p2.font.color.rgb = RGBColor(220, 220, 220)
                 
                 elif layout == 'closing':
                     tb = slide.shapes.add_textbox(Inches(2), Inches(2), Inches(9), Inches(2))
                     p = tb.text_frame.paragraphs[0]
-                    p.text = stitle
+                    p.text = _format_text(stitle)
                     p.font.size = Pt(40)
                     p.font.color.rgb = RGBColor(255, 255, 255)
                     p.font.bold = True
                     p.alignment = PP_ALIGN.CENTER
                     for t in ss.get('takeaways', []):
                         p2 = tb.text_frame.add_paragraph()
-                        p2.text = f"  {t}"
+                        p2.text = _format_text(f"  {t}")
                         p2.font.size = Pt(16)
                         p2.font.color.rgb = RGBColor(180, 180, 180)
                         p2.alignment = PP_ALIGN.CENTER
@@ -1270,14 +1312,14 @@ class Tools:
                     tb = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11), Inches(3))
                     p = tb.text_frame.paragraphs[0]
                     num = ss.get('number', '')
-                    p.text = f"{num}  {stitle}"
+                    p.text = _format_text(f"{num}  {stitle}")
                     p.font.size = Pt(36)
                     p.font.bold = True
                     p.font.color.rgb = RGBColor(255, 255, 255)
                     p.alignment = PP_ALIGN.CENTER
                     sub = slide.shapes.add_textbox(Inches(1), Inches(5), Inches(11), Inches(1.5))
                     ps = sub.text_frame.paragraphs[0]
-                    ps.text = ss.get('subtitle', '')
+                    ps.text = _format_text(ss.get('subtitle', ''))
                     ps.font.size = Pt(18)
                     ps.font.color.rgb = RGBColor(200, 200, 200)
                     ps.alignment = PP_ALIGN.CENTER
@@ -1290,7 +1332,7 @@ class Tools:
                         p = tb.text_frame.paragraphs[0]
                         time_str = item.get('time', '')
                         label = item.get('label', item.get('title', ''))
-                        p.text = f"{time_str}  |  {label}"
+                        p.text = _format_text(f"{time_str}  |  {label}")
                         p.font.size = Pt(18)
                         p.font.color.rgb = RGBColor(255, 255, 255)
                         if item.get('highlight', False):
@@ -1310,13 +1352,13 @@ class Tools:
                         tf = tb.text_frame
                         tf.word_wrap = True
                         p = tf.paragraphs[0]
-                        p.text = f"{icon}  {title}"
+                        p.text = _format_text(f"{icon}  {title}")
                         p.font.size = Pt(22)
                         p.font.bold = True
                         p.font.color.rgb = RGBColor(255, 255, 255)
                         if desc:
                             p2 = tf.add_paragraph()
-                            p2.text = desc
+                            p2.text = _format_text(desc)
                             p2.font.size = Pt(14)
                             p2.font.color.rgb = RGBColor(180, 180, 180)
 
@@ -1331,11 +1373,11 @@ class Tools:
                             tf = tb.text_frame
                             tf.word_wrap = True
                             p = tf.paragraphs[0]
-                            p.text = item.get('icon', '')
+                            p.text = _format_text(item.get('icon', ''))
                             p.font.size = Pt(36)
                             p.alignment = PP_ALIGN.CENTER
                             p2 = tf.add_paragraph()
-                            p2.text = item.get('title', '')
+                            p2.text = _format_text(item.get('title', ''))
                             p2.font.size = Pt(16)
                             p2.font.bold = True
                             p2.font.color.rgb = RGBColor(255, 255, 255)
@@ -1343,7 +1385,7 @@ class Tools:
                             desc = item.get('description', '')
                             if desc:
                                 p3 = tf.add_paragraph()
-                                p3.text = desc
+                                p3.text = _format_text(desc)
                                 p3.font.size = Pt(12)
                                 p3.font.color.rgb = RGBColor(180, 180, 180)
                                 p3.alignment = PP_ALIGN.CENTER
@@ -1355,14 +1397,14 @@ class Tools:
                     tf = tb.text_frame
                     tf.word_wrap = True
                     p = tf.paragraphs[0]
-                    p.text = f"\u201c{q}\u201d"
+                    p.text = _format_text(f"\u201c{q}\u201d")
                     p.font.size = Pt(28)
                     p.font.italic = True
                     p.font.color.rgb = RGBColor(255, 255, 255)
                     p.alignment = PP_ALIGN.CENTER
                     if author:
                         p2 = tf.add_paragraph()
-                        p2.text = f"-- {author}"
+                        p2.text = _format_text(f"-- {author}")
                         p2.font.size = Pt(16)
                         p2.font.color.rgb = RGBColor(180, 180, 180)
                         p2.alignment = PP_ALIGN.CENTER
@@ -1377,7 +1419,7 @@ class Tools:
                     s.line.fill.background()
                     tb = slide.shapes.add_textbox(Inches(1),Inches(1),Inches(11),Inches(1))
                     p = tb.text_frame.paragraphs[0]
-                    p.text = lv.upper()+': '+stitle
+                    p.text = _format_text(lv.upper()+': '+stitle)
                     p.font.size = Pt(32)
                     p.font.color.rgb = RGBColor(*ac)
                     p.font.bold = True
@@ -1385,7 +1427,7 @@ class Tools:
                     if bd:
                         tb2 = slide.shapes.add_textbox(Inches(1),Inches(2.5),Inches(11),Inches(4))
                         p2 = tb2.text_frame.paragraphs[0]
-                        p2.text = bd
+                        p2.text = _format_text(bd)
                         p2.font.size = Pt(18)
                         p2.font.color.rgb = RGBColor(200,200,200)
 
@@ -1401,7 +1443,7 @@ class Tools:
                         table = table_shape.table
                         for ci, h in enumerate(headers):
                             cell = table.cell(0, ci)
-                            cell.text = str(h)
+                            cell.text = _format_text(str(h))
                             for paragraph in cell.text_frame.paragraphs:
                                 paragraph.font.size = Pt(14)
                                 paragraph.font.bold = True
@@ -1409,7 +1451,7 @@ class Tools:
                         for ri, row in enumerate(rows):
                             for ci in range(n_cols):
                                 cell = table.cell(ri + 1, ci)
-                                cell.text = str(row[ci]) if ci < len(row) else ''
+                                cell.text = _format_text(str(row[ci]) if ci < len(row) else '')
                                 for paragraph in cell.text_frame.paragraphs:
                                     paragraph.font.size = Pt(12)
                                     paragraph.font.color.rgb = RGBColor(220, 220, 220)
@@ -1417,14 +1459,14 @@ class Tools:
                 elif layout == 'title_bar':
                     tb = slide.shapes.add_textbox(Inches(1), Inches(3), Inches(11), Inches(1))
                     p = tb.text_frame.paragraphs[0]
-                    p.text = stitle
+                    p.text = _format_text(stitle)
                     p.font.size = Pt(40)
                     p.font.bold = True
                     p.font.color.rgb = RGBColor(255, 255, 255)
                     p.alignment = PP_ALIGN.CENTER
                     sub = slide.shapes.add_textbox(Inches(1), Inches(4.5), Inches(11), Inches(1))
                     ps = sub.text_frame.paragraphs[0]
-                    ps.text = ss.get('subtitle', t)
+                    ps.text = _format_text(ss.get('subtitle', t))
                     ps.font.size = Pt(18)
                     ps.font.color.rgb = RGBColor(200, 200, 200)
                     ps.alignment = PP_ALIGN.CENTER            
@@ -1515,7 +1557,7 @@ class Tools:
 
                     # Write headers
                     for j, col in enumerate(columns, 1):
-                        cell = ws.cell(row=1, column=j, value=col.get('header', col.get('key', '')))
+                        cell = ws.cell(row=1, column=j, value=_format_text(col.get('header', col.get('key', ''))))
                         cell.font = header_font
                         cell.fill = header_fill
                         cell.alignment = Alignment(horizontal='center')
@@ -1534,7 +1576,7 @@ class Tools:
                                 if template == 'financial':
                                     cell.font = Font(color="000000", size=11)
                             else:
-                                cell.value = val
+                                cell.value = _format_text(val) if not (isinstance(val, str) and val.startswith('=')) else val
                                 if template == 'financial' and col.get('format') in ('currency', 'number'):
                                     cell.font = Font(color="1F4E79", size=11)
                                     if input_fill:
@@ -1630,14 +1672,14 @@ class Tools:
                     stats = sheet_spec.get('stats', [])
                     title_val = sheet_spec.get('title', '')
                     if title_val:
-                        ws.cell(row=1, column=1, value=title_val).font = Font(bold=True, size=14, color=acc_hex)
+                        ws.cell(row=1, column=1, value=_format_text(title_val)).font = Font(bold=True, size=14, color=acc_hex)
                     for idx, stat in enumerate(stats):
                         col = idx * 3 + 1
-                        ws.cell(row=3, column=col, value=stat.get('value', '')).font = Font(bold=True, size=24, color="000000")
-                        ws.cell(row=4, column=col, value=stat.get('label', '')).font = Font(size=11, color="808080")
+                        ws.cell(row=3, column=col, value=_format_text(stat.get('value', ''))).font = Font(bold=True, size=24, color="000000")
+                        ws.cell(row=4, column=col, value=_format_text(stat.get('label', ''))).font = Font(size=11, color="808080")
                         change = stat.get('change', '')
                         if change:
-                            c = ws.cell(row=5, column=col, value=change)
+                            c = ws.cell(row=5, column=col, value=_format_text(change))
                             c.font = Font(size=12, color="27AE60" if '+' in str(change) else "E74C3C")
                     # Auto-fit KPI columns
                     for idx in range(len(stats)):
@@ -1650,31 +1692,31 @@ class Tools:
                     note_color = colors.get(note_spec.get('level', 'info'), '1F4E79')
                     title_val = note_spec.get('title', '')
                     if title_val:
-                        ws.cell(row=1, column=1, value=title_val).font = Font(bold=True, size=14, color=note_color)
+                        ws.cell(row=1, column=1, value=_format_text(title_val)).font = Font(bold=True, size=14, color=note_color)
                     note_text = note_spec.get('text', '')
                     if note_text:
-                        ws.cell(row=3, column=1, value=note_text).font = Font(size=11)
+                        ws.cell(row=3, column=1, value=_format_text(note_text)).font = Font(size=11)
                     ws.column_dimensions['A'].width = 80
 
                 elif kind == 'inputs':
                     items = sheet_spec.get('items', [])
                     title_val = sheet_spec.get('title', '')
                     if title_val:
-                        ws.cell(row=1, column=1, value=title_val).font = Font(bold=True, size=14, color=acc_hex)
+                        ws.cell(row=1, column=1, value=_format_text(title_val)).font = Font(bold=True, size=14, color=acc_hex)
                     for idx, item in enumerate(items):
                         row = idx * 3 + 3
-                        label_cell = ws.cell(row=row, column=1, value=item.get('label', ''))
+                        label_cell = ws.cell(row=row, column=1, value=_format_text(item.get('label', '')))
                         label_cell.font = Font(bold=True, size=11)
-                        val_cell = ws.cell(row=row, column=2, value=item.get('value', ''))
+                        val_cell = ws.cell(row=row, column=2, value=_format_text(item.get('value', '')))
                         if template == 'financial' and input_fill:
                             val_cell.fill = input_fill
                             val_cell.font = input_font or Font(color="1F4E79", size=11)
                         unit = item.get('unit', '')
                         if unit:
-                            ws.cell(row=row, column=3, value=unit).font = Font(size=10, color="808080")
+                            ws.cell(row=row, column=3, value=_format_text(unit)).font = Font(size=10, color="808080")
                         comment = item.get('comment', '')
                         if comment:
-                            ws.cell(row=row+1, column=1, value=comment).font = Font(size=9, color="808080", italic=True)
+                            ws.cell(row=row+1, column=1, value=_format_text(comment)).font = Font(size=9, color="808080", italic=True)
                     ws.column_dimensions['A'].width = 20
                     ws.column_dimensions['B'].width = 15
 
@@ -1683,8 +1725,8 @@ class Tools:
                     chart_type = sheet_spec.get('chart_type', 'bar')
                     chart_title = sheet_spec.get('chart_title', name)
                     data_ref = sheet_spec.get('data_ref', 'A1:B10')
-                    ws.cell(row=1, column=1, value=f"Chart: {chart_title}").font = Font(bold=True, size=14, color=acc_hex)
-                    ws.cell(row=2, column=1, value=f"Type: {chart_type}").font = Font(size=11, color="808080")
+                    ws.cell(row=1, column=1, value=_format_text(f"Chart: {chart_title}")).font = Font(bold=True, size=14, color=acc_hex)
+                    ws.cell(row=2, column=1, value=_format_text(f"Type: {chart_type}")).font = Font(size=11, color="808080")
                     ws.cell(row=3, column=1, value=f"Data reference: {data_ref}").font = Font(size=11, color="808080")
                     ws.cell(row=5, column=1, value="Note: Chart rendering requires data from a table sheet.").font = Font(size=10, color="808080", italic=True)
 
