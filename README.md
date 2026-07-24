@@ -2,6 +2,8 @@
 
 Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx) directly from Open WebUI chats. Preserves original formatting and styles. Supports Word track changes (redlines) with custom author names.
 
+**Cross-platform:** Works on Windows, Mac, and Linux — no configuration needed.
+
 ## Features
 
 | # | Function | Formats | Description |
@@ -10,14 +12,25 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx) directly 
 | 2 | `add_content` | .xlsx .xls .docx .pptx | Add new content while preserving ALL original formatting. CSV rows for Excel, text for Word, slides for PowerPoint. |
 | 3 | `replace_text` | .xlsx .xls .docx .pptx | Find and replace text across the entire file preserving fonts, styles, and cell formatting. |
 | 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. |
-| 5 | `tracked_change` 🆕 | .docx | Apply Word track changes (redlines) with custom author name. Supports replace, insert, and delete modes. |
-| 6 | `manage_revisions` 🆕 | .docx | List all tracked changes, accept all, or reject all revisions in a Word document. |
-| 7 | `merge_pdfs` 🆕 | .pdf | Merge multiple PDFs into one using PyMuPDF. |
-| 8 | `split_pdf` 🆕 | .pdf | Split PDF into parts by page count. |
-| 9 | `merge_sheets` 🆕 | .xlsx | Merge Excel files preserving styles. |
-| 10 | `batch_process` 🆕 | All | Apply operation to multiple files at once. |
-| 11 | `auto_backup` 🆕 | - | Timestamped database backup for safety. |
-| 12 | `tool_stats` 🆕 | - | Show tool usage dashboard with counts. |
+| 5 | `tracked_change` | .docx | Apply Word track changes (redlines) with custom author name. Supports replace, insert, and delete modes. |
+| 6 | `manage_revisions` | .docx | List all tracked changes, accept all, or reject all revisions in a Word document. |
+| 7 | `merge_pdfs` | .pdf | Merge multiple PDFs into one using PyMuPDF. |
+| 8 | `split_pdf` | .pdf | Split PDF into parts by page count. |
+| 9 | `merge_sheets` | .xlsx | Merge Excel files preserving styles. |
+| 10 | `batch_process` | All | Apply operation to multiple files at once. |
+| 11 | `auto_backup` | - | Timestamped database backup for safety. |
+| 12 | `tool_stats` | - | Show tool usage dashboard with counts. |
+| 13 | `generate_document` | .docx | Generate professional Word documents with cover page, TOC, callouts, signatures, headers/footers. |
+| 14 | `generate_slides` | .pptx | Generate PowerPoint presentations with 13 layouts, 5 chart types, 6 themes. |
+| 15 | `generate_spreadsheet` | .xlsx | Generate Excel workbooks with tables, formulas, conditional formatting, multi-sheet. |
+
+### Text Formatting (v2.3.0)
+
+All generated documents (DOCX, PPTX, XLSX) are automatically formatted with:
+- **No em dashes** — replaced with regular hyphens
+- **Sentence case** — only first letter of each sentence is uppercase
+- **Acronym preservation** — API, PDF, HTML, CSS, JSON, SQL, etc. kept uppercase
+- **Excel formulas preserved** — values starting with `=` are not modified
 
 ### Track Changes (v1.2.0)
 
@@ -72,10 +85,28 @@ Search for "Edit Office Files" in the Open WebUI Community tools.
 ```bash
 pip install openpyxl python-docx python-pptx xlrd docx-revisions
 ```
-5. Start the file server: `python file_server.py` (serves files on port 9000)
 
 ### Method 3: Batch Install
 Use the Batch Install Plugins tool in Open WebUI pointing to this repo.
+
+## Cross-Platform & Docker
+
+The tool auto-detects your operating system:
+
+| OS | Database path | Uploads path |
+|---|---|---|
+| **Windows** | `%APPDATA%\open-webui\data\webui.db` | `%APPDATA%\open-webui\data\uploads` |
+| **Mac** | `~/Library/Application Support/open-webui/data/webui.db` | `~/Library/Application Support/open-webui/data/uploads` |
+| **Linux / Docker** | `$OPEN_WEBUI_DATA_DIR/data/webui.db` | `$OPEN_WEBUI_DATA_DIR/data/uploads` |
+
+For **Docker users on Mac**, set the export directory via environment variable:
+```bash
+# In docker-compose.yml:
+environment:
+  - OWUI_EXPORTS_DIR=/app/backend/data/outputs
+```
+
+Or configure the `export_dir` Valve in the Open WebUI tool settings.
 
 ## Usage Examples
 
