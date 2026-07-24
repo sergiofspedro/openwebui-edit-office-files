@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Updated `.gitignore` to exclude generated Office files and compiled Python
 
+## [2.4.0] - 2026-07-24
+
+### Added
+- **Cross-platform support** — tool now works on Windows, Mac, and Linux without configuration:
+  - Windows: `%APPDATA%\open-webui\data\`
+  - Mac: `~/Library/Application Support/open-webui/data/`
+  - Linux/Docker: `$OPEN_WEBUI_DATA_DIR/data/`
+- Helper functions `_get_owui_data_dir()` and `_get_owui_uploads_dir()` that auto-detect the OS
+
+### Removed
+- All hardcoded Windows paths (`C:\Users\...`, `AppData\Roaming\`, `LOCALAPPDATA`)
+
 ## [2.3.0] - 2026-07-24
 
 ### Added

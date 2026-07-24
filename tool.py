@@ -26,20 +26,14 @@ _DB_PATH = os.path.join(
     "data", "webui.db",
 )
 if not os.path.isfile(_DB_PATH):
-    _DB_PATH = os.path.join(
-        os.path.expanduser("~"),
-        "AppData", "Roaming", "open-webui", "data", "webui.db",
-    )
+    _DB_PATH = os.path.join(_get_owui_data_dir(), "webui.db")
 
 _UPLOAD_DIR = os.path.join(
     os.environ.get("OPEN_WEBUI_DATA_DIR", ""),
     "data", "uploads",
 )
 if not os.path.isdir(_UPLOAD_DIR):
-    _UPLOAD_DIR = os.path.join(
-        os.path.expanduser("~"),
-        "AppData", "Roaming", "open-webui", "data", "uploads",
-    )
+    _UPLOAD_DIR = _get_owui_uploads_dir()
 
 _EXPORT_DIR = os.environ.get("OWUI_EXPORTS_DIR", os.path.join(os.path.expanduser("~"), "open-webui", "exports"))
 
@@ -108,7 +102,7 @@ def _read_file_bytes(file_id: str) -> Optional[bytes]:
         _allowed = False
         for _base in (_UPLOAD_DIR, _EXPORT_DIR,
                        os.path.join(os.environ.get("OPEN_WEBUI_DATA_DIR", ""), "data"),
-                       os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "open-webui", "data")):
+                       _get_owui_data_dir()):
             if _base and os.path.realpath(_base) in _abs:
                 _allowed = True
                 break
@@ -275,6 +269,29 @@ def _format_text(text: str) -> str:
     return text
 
 
+
+def _get_owui_data_dir() -> str:
+    """Return the Open WebUI data directory for the current OS."""
+    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
+    if data_dir:
+        return data_dir
+    home = os.path.expanduser("~")
+    if platform.system() == "Windows":
+        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data")
+    else:
+        return os.path.join(home, "Library", "Application Support", "open-webui", "data")
+
+def _get_owui_uploads_dir() -> str:
+    """Return the Open WebUI uploads directory for the current OS."""
+    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
+    if data_dir:
+        return os.path.join(data_dir, "data", "uploads")
+    home = os.path.expanduser("~")
+    if platform.system() == "Windows":
+        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data", "uploads")
+    else:
+        return os.path.join(home, "Library", "Application Support", "open-webui", "data", "uploads")
+
 # =========================================================================
 class Tools:
     class Valves:
@@ -284,7 +301,7 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         ed = self.valves.export_dir or os.path.join(
-            os.environ.get("OWUI_EXPORTS_DIR", os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
+            os.environ.get("OWUI_EXPORTS_DIR", os.path.expanduser("~")),
             "open-webui", "exports",
         )
         os.makedirs(ed, exist_ok=True)
@@ -296,7 +313,7 @@ class Tools:
         """Save file and return (url, filename) or (None, None)."""
         try:
             ed = self.valves.export_dir or os.path.join(
-                os.environ.get("OWUI_EXPORTS_DIR", os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
+                os.environ.get("OWUI_EXPORTS_DIR", os.path.expanduser("~")),
                 "open-webui", "exports",
             )
             os.makedirs(ed, exist_ok=True)
@@ -1750,7 +1767,7 @@ class Tools:
         """
         try:
             import sqlite3 as s3
-            conn2 = s3.connect(r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db")
+            conn2 = s3.connect(r"_DB_PATH")
             row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
             if not row:
                 row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
@@ -1761,7 +1778,7 @@ class Tools:
             meta = json.loads(row[1]) if row[1] else {}
             fp = meta.get("path", file_id)
             if not os.path.exists(fp):
-                fp = os.path.join(os.environ.get("APPDATA",""), "open-webui", "data", "uploads", os.path.basename(fp))
+                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
             if not os.path.exists(fp):
                 conn2.close()
                 return json.dumps({"error": "File not found on disk"})
@@ -1815,7 +1832,7 @@ class Tools:
         try:
             import sqlite3 as s3, openpyxl, io, os
             from copy import copy
-            conn2 = s3.connect(r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db")
+            conn2 = s3.connect(r"_DB_PATH")
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             wb_out = openpyxl.Workbook()
             wb_out.remove(wb_out.active)
@@ -1830,7 +1847,7 @@ class Tools:
                 meta = json.loads(row[1]) if row[1] else {}
                 fp = meta.get("path", fid)
                 if not os.path.exists(fp):
-                    alt = os.path.join(os.environ.get("APPDATA",""), "open-webui","data","uploads", os.path.basename(fp))
+                    alt = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
                     fp = alt if os.path.exists(alt) else ""
                 if not fp or not os.path.exists(fp):
                     continue
@@ -1887,8 +1904,8 @@ class Tools:
     async def auto_backup(self, __user__=None, __request__=None) -> str:
         try:
             import shutil, datetime
-            db_path = r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db"
-            backup_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "open-webui", "backups")
+            db_path = r"_DB_PATH"
+            backup_dir = os.path.join(os.path.expanduser("~"), "open-webui", "backups")
             os.makedirs(backup_dir, exist_ok=True)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"webui_backup_{timestamp}.db"
@@ -1904,7 +1921,7 @@ class Tools:
     async def merge_pdfs(self, file_ids: str, output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
             import fitz, sqlite3 as s3, io, os
-            conn2 = s3.connect(r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db")
+            conn2 = s3.connect(r"_DB_PATH")
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             merger = fitz.open()
             count = 0
@@ -1917,7 +1934,7 @@ class Tools:
                 meta = json.loads(row[0]) if row[0] else {}
                 fp = meta.get("path", fid)
                 if not os.path.exists(fp):
-                    fp = os.path.join(os.environ.get("APPDATA",""), "open-webui","data","uploads", os.path.basename(fp))
+                    fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
                 if not os.path.exists(fp):
                     continue
                 src = fitz.open(fp)
@@ -1943,7 +1960,7 @@ class Tools:
     async def split_pdf(self, file_id: str, pages_per_file: int = 1, output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
             import fitz, sqlite3 as s3, io, os
-            conn2 = s3.connect(r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db")
+            conn2 = s3.connect(r"_DB_PATH")
             row = conn2.execute("SELECT meta FROM file WHERE id=?", (file_id,)).fetchone()
             if not row:
                 row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+file_id+"%",)).fetchone()
@@ -1953,7 +1970,7 @@ class Tools:
             meta = json.loads(row[0]) if row[0] else {}
             fp = meta.get("path", file_id)
             if not os.path.exists(fp):
-                fp = os.path.join(os.environ.get("APPDATA",""), "open-webui","data","uploads", os.path.basename(fp))
+                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
             if not os.path.exists(fp):
                 conn2.close()
                 return json.dumps({"error": "File not found on disk"})
@@ -1983,13 +2000,13 @@ class Tools:
     async def tool_stats(self, __user__=None, __request__=None) -> str:
         try:
             import sqlite3 as s3
-            conn2 = s3.connect(r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db")
+            conn2 = s3.connect(r"_DB_PATH")
             tool_count = conn2.execute("SELECT COUNT(*) FROM tool WHERE is_active=1").fetchone()[0]
             func_count = conn2.execute("SELECT COUNT(*) FROM function WHERE is_active=1").fetchone()[0]
             model_count = conn2.execute("SELECT COUNT(*) FROM model WHERE is_active=1").fetchone()[0]
-            exports_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "open-webui", "exports")
+            exports_dir = os.path.join(os.path.expanduser("~"), "open-webui", "exports")
             export_count = len([f for f in os.listdir(exports_dir) if os.path.isfile(os.path.join(exports_dir, f))]) if os.path.exists(exports_dir) else 0
-            db_size_kb = os.path.getsize(r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db") / 1024
+            db_size_kb = os.path.getsize(r"_DB_PATH") / 1024
             conn2.close()
             return json.dumps({
                 "tools": tool_count,
@@ -2006,7 +2023,7 @@ class Tools:
         """List, accept_all or reject_all tracked changes in a Word document."""
         try:
             import sqlite3 as s3
-            conn2 = s3.connect(r"C:\\Users\\Administrator\\AppData\\Roaming\\open-webui\\data\\webui.db")
+            conn2 = s3.connect(r"_DB_PATH")
             row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
             if not row:
                 row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
@@ -2017,7 +2034,7 @@ class Tools:
             meta = json.loads(row[1]) if row[1] else {}
             fp = meta.get("path", file_id)
             if not os.path.exists(fp):
-                fp = os.path.join(os.environ.get("APPDATA",""), "open-webui", "data", "uploads", os.path.basename(fp))
+                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
             with open(fp, "rb") as f:
                 data = f.read()
             conn2.close()
