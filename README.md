@@ -8,7 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx) directly 
 
 | # | Function | Formats | Description |
 |---|---|---|---|
-| 1 | `read_file` | .xlsx .xls .docx .pptx | Read any Office file and return contents as structured JSON. Detects highlights, bold, italic in DOCX. |
+| 1 | `read_file` | .xlsx .xls .docx .pptx .odt .ods .odp | Read any Office file and return contents as structured JSON. Detects highlights, bold, italic in DOCX. LibreOffice ODF support. |
 | 2 | `add_content` | .xlsx .xls .docx .pptx | Add new content while preserving ALL original formatting. CSV rows for Excel, text for Word, slides for PowerPoint. |
 | 3 | `replace_text` | .xlsx .xls .docx .pptx | Find and replace text across the entire file preserving fonts, styles, and cell formatting. |
 | 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. |
@@ -23,6 +23,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx) directly 
 | 13 | `generate_document` | .docx | Generate professional Word documents with cover page, TOC, callouts, signatures, headers/footers. |
 | 14 | `generate_slides` | .pptx | Generate PowerPoint presentations with 13 layouts, 5 chart types, 6 themes. |
 | 15 | `generate_spreadsheet` | .xlsx | Generate Excel workbooks with tables, formulas, conditional formatting, multi-sheet. |
+| 16 | `cleanup_files` | - | Remove generated Office files older than N days from storage and database. Default 30 days. |
 
 ### Text Formatting (v2.3.0)
 
@@ -71,6 +72,9 @@ manage_revisions(file_id, action="accept_all")
 | .pptx | Yes | Yes | Yes | Full support via python-pptx |
 | .doc | No | No | No | Suggest converting to .docx |
 | .ppt | No | No | No | Suggest converting to .pptx |
+| .odt | Yes | No | No | LibreOffice Writer via odfpy |
+| .ods | Yes | No | No | LibreOffice Calc via odfpy |
+| .odp | Yes | No | No | LibreOffice Impress via odfpy |
 
 ## Installation
 
@@ -182,6 +186,7 @@ Without this header, download links will use `localhost:3000` and won't work fro
 - `python-pptx` — PowerPoint .pptx read/write
 - `xlrd` — Legacy Excel .xls read
 - `docx-revisions` — Word track changes (redlines)
+- `odfpy` — LibreOffice ODF read (.odt, .ods, .odp)
 - `lxml` — XML processing (dependency of docx-revisions)
 
 ## License
