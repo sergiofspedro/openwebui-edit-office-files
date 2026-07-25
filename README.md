@@ -1,8 +1,17 @@
 # Edit Office Files — Open WebUI Tool
 
-Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx) directly from Open WebUI chats. Preserves original formatting and styles. Supports Word track changes (redlines) with custom author names.
+Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .ods, .odp) directly from Open WebUI chats. Preserves original formatting and styles. Supports Word track changes (redlines) with custom author names.
 
-**Cross-platform:** Works on Windows, Mac, and Linux — no configuration needed.
+**Cross-platform:** Works on Windows, Mac, Linux, and VPS/Docker — no configuration needed. **LibreOffice ODF** read support included.
+
+## What's New
+
+| Version | Feature |
+|---|---|
+| **v3.1.0** | LibreOffice ODF support (.odt, .ods, .odp) + File cleanup |
+| **v3.0.0** | Native file API — no file server needed, works on VPS/Docker |
+| **v2.4.0** | Cross-platform auto-detection (Windows, Mac, Linux) |
+| **v2.3.0** | Automatic text formatting (sentence case, no em dashes) |
 
 ## Features
 
@@ -24,6 +33,23 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx) directly 
 | 14 | `generate_slides` | .pptx | Generate PowerPoint presentations with 13 layouts, 5 chart types, 6 themes. |
 | 15 | `generate_spreadsheet` | .xlsx | Generate Excel workbooks with tables, formulas, conditional formatting, multi-sheet. |
 | 16 | `cleanup_files` | - | Remove generated Office files older than N days from storage and database. Default 30 days. |
+
+### LibreOffice ODF Support (v3.1.0)
+
+Read LibreOffice and OpenOffice files natively:
+- **.odt** — Writer documents
+- **.ods** — Calc spreadsheets
+- **.odp** — Impress presentations
+
+Requires `odfpy` dependency. Graceful error handling for invalid files.
+
+### File Cleanup (v3.1.0)
+
+Manage storage with `cleanup_files(days_old=30)`:
+- Removes generated Office files older than N days
+- Cleans both disk and database
+- Uses `source: "office-plugin"` metadata to identify generated files
+- Example: `cleanup_files(days_old=7)` — removes files older than 1 week
 
 ### Text Formatting (v2.3.0)
 
@@ -87,15 +113,15 @@ Search for "Edit Office Files" in the Open WebUI Community tools.
 3. Paste the code and save
 4. Install dependencies:
 ```bash
-pip install openpyxl python-docx python-pptx xlrd docx-revisions
+pip install openpyxl python-docx python-pptx xlrd docx-revisions odfpy pydantic
 ```
 
 ### Method 3: Batch Install
 Use the Batch Install Plugins tool in Open WebUI pointing to this repo.
 
-## Cross-Platform & Docker
+## Cross-Platform & VPS/Docker
 
-The tool auto-detects your operating system:
+The tool auto-detects your operating system and works on all platforms:
 
 | OS | Database path | Uploads path |
 |---|---|---|
@@ -103,14 +129,11 @@ The tool auto-detects your operating system:
 | **Mac** | `~/Library/Application Support/open-webui/data/webui.db` | `~/Library/Application Support/open-webui/data/uploads` |
 | **Linux / Docker** | `$OPEN_WEBUI_DATA_DIR/data/webui.db` | `$OPEN_WEBUI_DATA_DIR/data/uploads` |
 
-For **Docker users on Mac**, set the export directory via environment variable:
-```bash
-# In docker-compose.yml:
-environment:
-  - OWUI_EXPORTS_DIR=/app/backend/data/outputs
-```
+### VPS & Server Deployments
 
-Or configure the `export_dir` Valve in the Open WebUI tool settings.
+Since v3.0.0, the tool uses Open WebUI's **native file API** — no separate file server needed. Generated files are saved to the uploads directory and served via `/api/v1/files/{id}/content`. This works out of the box on VPS, Docker, and behind reverse proxies.
+
+For **Docker users**, no extra configuration is needed. The tool auto-detects the environment.
 
 ## Usage Examples
 
