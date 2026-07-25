@@ -4,7 +4,7 @@ author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
 version: 3.0.0
-requirements: openpyxl, python-docx, python-pptx, xlrd
+requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
 import io
@@ -274,6 +274,110 @@ def _format_text(text: str) -> str:
 
 
 
+
+# ---------------------------------------------------------------------------
+# Office Plugin Registry — allows external plugins to register document processors
+# ---------------------------------------------------------------------------
+_office_plugins: dict = {}
+
+def register_office_plugin(name: str):
+    """Decorator to register an office document processor plugin."""
+    def decorator(func):
+        _office_plugins[name] = func
+        return func
+    return decorator
+
+def _call_office_plugins(plugin_type: str, *args, **kwargs) -> dict:
+    """Call all registered plugins of a given type and return results dict."""
+    results = {}
+    for pname, plugin in _office_plugins.items():
+        try:
+            if callable(plugin):
+                results[pname] = plugin(plugin_type, *args, **kwargs)
+        except Exception as e:
+            print(f"[office-plugin] '{pname}' failed on '{plugin_type}': {e}", file=sys.stderr)
+    return results
+
+# ---------------------------------------------------------------------------
+# Base64 Filename Encoding — safe storage of filenames in SQLite3
+# ---------------------------------------------------------------------------
+import base64 as _b64_mod
+
+def _encode_filename(filename: str) -> str:
+    """Encode filename to base64 for safe SQLite3 storage (handles international chars, special chars, path traversal)."""
+    if not filename:
+        return filename
+    safe = filename.encode('utf-8')
+    encoded = _b64_mod.urlsafe_b64encode(safe).decode('ascii').rstrip('=')
+    _, ext = os.path.splitext(filename)
+    return encoded + ext
+
+def _decode_filename(encoded_name: str) -> str:
+    """Decode a base64-encoded filename back to original. Returns as-is if decoding fails."""
+    try:
+        base = os.path.splitext(encoded_name)[0]
+        padding = 4 - len(base) % 4
+        if padding != 4:
+            base += '=' * padding
+        decoded = _b64_mod.urlsafe_b64decode(base).decode('utf-8')
+        return decoded + os.path.splitext(encoded_name)[1]
+    except Exception:
+        return encoded_name
+
+
+
+def _read_odf(file_bytes: bytes, filename: str) -> str:
+    """Read ODF files (.odt, .ods, .odp) and return structured text."""
+    ext = os.path.splitext(filename)[1].lower()
+    
+    if ext == ".ods":
+        from odf.opendocument import load
+        from odf.table import Table, TableRow, TableCell
+        from odf.text import P
+        
+        doc = load(io.BytesIO(file_bytes))
+        result = []
+        for table in doc.getElementsByType(Table):
+            for row in table.getElementsByType(TableRow):
+                cells = []
+                for cell in row.getElementsByType(TableCell):
+                    text_parts = []
+                    for p in cell.getElementsByType(P):
+                        text_parts.append(str(p))
+                    cells.append(" ".join(text_parts).strip())
+                result.append(" | ".join(cells))
+        return "\n".join(result)
+    
+    elif ext == ".odt":
+        from odf.opendocument import load
+        from odf.text import P, H
+        
+        doc = load(io.BytesIO(file_bytes))
+        result = []
+        for elem in doc.getElementsByType(H):
+            result.append(f"## {str(elem)}")
+        for elem in doc.getElementsByType(P):
+            text = str(elem).strip()
+            if text:
+                result.append(text)
+        return "\n\n".join(result)
+    
+    elif ext == ".odp":
+        from odf.opendocument import load
+        from odf.text import P
+        
+        doc = load(io.BytesIO(file_bytes))
+        result = []
+        slide_num = 0
+        for elem in doc.getElementsByType(P):
+            text = str(elem).strip()
+            if text:
+                result.append(f"Slide {slide_num + 1}: {text}")
+                slide_num += 1
+        return "\n".join(result)
+    
+    return f"Unsupported ODF format: {ext}"
+
 # =========================================================================
 class Tools:
     class Valves(BaseModel):
@@ -305,6 +409,9 @@ class Tools:
             ".doc": "application/msword",
             ".ppt": "application/vnd.ms-powerpoint",
             ".pdf": "application/pdf",
+            ".odt": "application/vnd.oasis.opendocument.text",
+            ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+            ".odp": "application/vnd.oasis.opendocument.presentation",
         }
         content_type = mt.get(ext, "application/octet-stream")
 
@@ -325,7 +432,7 @@ class Tools:
                     file_id,
                     "",
                     file_hash,
-                    filename,
+                    _encode_filename(filename),
                     os.path.join(_UPLOAD_DIR, file_id),
                     "{}",
                     json.dumps({
@@ -2041,6 +2148,48 @@ class Tools:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     
+
+    async def cleanup_files(self, days_old: int = 30) -> str:
+        """Remove generated Office files older than N days. Default 30 days."""
+        import time as _time
+        
+        cutoff = int(_time.time()) - (days_old * 86400)
+        
+        conn = sqlite3.connect(_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, filename, created_at FROM file WHERE meta LIKE '%office-plugin%' AND created_at < ?",
+            (cutoff,)
+        ).fetchall()
+        
+        if not rows:
+            conn.close()
+            return f"No office-generated files older than {days_old} days found."
+        
+        deleted = []
+        errors = []
+        for row in rows:
+            try:
+                fpath = os.path.join(_UPLOAD_DIR, row["id"])
+                if os.path.exists(fpath):
+                    os.remove(fpath)
+                conn.execute("DELETE FROM file WHERE id = ?", (row["id"],))
+                deleted.append(row["filename"])
+            except Exception as e:
+                errors.append(f"{row['filename']}: {e}")
+        
+        conn.commit()
+        conn.close()
+        
+        result = f"Cleaned up {len(deleted)} file(s) older than {days_old} days:\n"
+        for f in deleted:
+            result += f"- {f}\n"
+        if errors:
+            result += f"\nErrors ({len(errors)}):\n"
+            for e in errors:
+                result += f"- {e}\n"
+        return result
+
     async def manage_revisions(self, file_id: str, action: str, output_filename: str = "", __user__=None, __request__=None) -> str:
         """List, accept_all or reject_all tracked changes in a Word document."""
         try:
