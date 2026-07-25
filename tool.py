@@ -3,19 +3,22 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 1.1.0
+version: 3.0.0
 requirements: openpyxl, python-docx, python-pptx, xlrd
 """
-import json
+
 import io
+import json
 import os
+import platform
 import re
 import sqlite3
 import sys
 import traceback
-import platform
 from copy import copy
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
 
 
 def _get_owui_data_dir() -> str:
@@ -159,31 +162,10 @@ def _detect_type(filename: str) -> str:
     return "unknown"
 
 
-def _save_file_sync(file_bytes: bytes, filename: str) -> Optional[str]:
-    """Save file to exports dir and return HTTP download URL."""
-    try:
-        os.makedirs(_EXPORT_DIR, exist_ok=True)
-        safe = "".join(c for c in filename if c.isalnum() or c in "._- ")
-        if not safe:
-            safe = "export"
-        base_name, ext = os.path.splitext(safe)
-        fname = safe
-        counter = 2
-        while os.path.exists(os.path.join(_EXPORT_DIR, fname)):
-            fname = f"{base_name} ({counter}){ext}"
-            counter += 1
-        fpath = os.path.join(_EXPORT_DIR, fname)
-        with open(fpath, "wb") as f:
-            f.write(file_bytes)
-        return f"http://localhost:9000/{fname}"
-    except Exception as e:
-        print(f"[office] Export save failed: {e}", file=sys.stderr)
-        return None
-
-
 def _cell_value(cell):
     """Extract a JSON-safe value from an openpyxl cell."""
     import datetime
+
     v = cell.value
     if v is None:
         return None
@@ -294,53 +276,93 @@ def _format_text(text: str) -> str:
 
 # =========================================================================
 class Tools:
-    class Valves:
-        export_dir: str = ""
-        file_server_url: str = ""
+    class Valves(BaseModel):
+        base_url: Optional[str] = Field(
+            default=None,
+            description="Override the base URL for download links. Auto-detected from X-Original-Host header or WEBUI_URL env var if unset.",
+        )
+        pass
 
     def __init__(self):
         self.valves = self.Valves()
-        ed = self.valves.export_dir or os.path.join(
-            os.environ.get("OWUI_EXPORTS_DIR", os.path.expanduser("~")),
-            "open-webui", "exports",
-        )
-        os.makedirs(ed, exist_ok=True)
 
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
-    async def _save_and_link(self, file_bytes: bytes, filename: str) -> tuple:
-        """Save file and return (url, filename) or (None, None)."""
+    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None) -> tuple:
+        """Save file to Open WebUI uploads dir, register in DB, return download URL."""
+        import base64 as _b64
+        import hashlib
+        import time as _time
+        import uuid as _uuid
+
+        ext = os.path.splitext(filename)[1].lower()
+        mt = {
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".xls": "application/vnd.ms-excel",
+            ".doc": "application/msword",
+            ".ppt": "application/vnd.ms-powerpoint",
+            ".pdf": "application/pdf",
+        }
+        content_type = mt.get(ext, "application/octet-stream")
+
         try:
-            ed = self.valves.export_dir or os.path.join(
-                os.environ.get("OWUI_EXPORTS_DIR", os.path.expanduser("~")),
-                "open-webui", "exports",
-            )
-            os.makedirs(ed, exist_ok=True)
-            safe = "".join(c for c in filename if c.isalnum() or c in "._- ")
-            if not safe:
-                safe = "export"
-            base_name, ext = os.path.splitext(safe)
-            fname = safe
-            counter = 2
-            while os.path.exists(os.path.join(ed, fname)):
-                fname = f"{base_name} ({counter}){ext}"
-                counter += 1
-            fpath = os.path.join(ed, fname)
-            with open(fpath, "wb") as f:
+            file_id = str(_uuid.uuid4())
+            with open(os.path.join(_UPLOAD_DIR, file_id), "wb") as f:
                 f.write(file_bytes)
-            base_url = (self.valves.file_server_url or "http://localhost:9000").rstrip("/")
-            url = f"{base_url}/{fname}"
+
+            file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
+            now = int(_time.time())
+
+            conn = sqlite3.connect(_DB_PATH)
+            conn.execute(
+                """INSERT OR REPLACE INTO file
+                   (id, user_id, hash, filename, path, data, meta, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    file_id,
+                    "",
+                    file_hash,
+                    filename,
+                    os.path.join(_UPLOAD_DIR, file_id),
+                    "{}",
+                    json.dumps({
+                        "name": filename,
+                        "content_type": content_type,
+                        "size": len(file_bytes),
+                        "source": "office-plugin",
+                        "generated": True,
+                    }),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            base_url = self.valves.base_url
+            if not base_url and __request__:
+                try:
+                    host = __request__.headers.get("x-original-host")
+                    if host:
+                        base_url = f"https://{host}"
+                except Exception:
+                    pass
+            if not base_url:
+                base_url = os.environ.get("WEBUI_URL", "http://localhost:3000")
+            base_url = base_url.rstrip("/")
+
+            url = f"{base_url}/api/v1/files/{file_id}/content"
             return (url, filename)
+
         except Exception as e:
-            print(f"[office] Export save failed: {e}", file=sys.stderr)
+            print(f"[office] Save failed: {e}", file=sys.stderr)
             try:
-                import base64 as b64
-                data = b64.b64encode(file_bytes).decode("ascii")
-                ext = os.path.splitext(filename)[1].lower()
-                mt = {".xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",".docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",".pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
-                return (f"data:{mt.get(ext,"application/octet-stream")};base64,{data}", filename)
-            except:
+                data = _b64.b64encode(file_bytes).decode("ascii")
+                return (f"data:{content_type};base64,{data}", filename)
+            except Exception:
                 return (None, None)
 
     # -----------------------------------------------------------------
@@ -757,7 +779,7 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nAdded content to {file_type.upper()} file, preserving original formatting."
             return json.dumps({"error": "Could not save file"})
@@ -923,7 +945,7 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nReplaced '{find_text}' with '{replace_with}' in {count} place(s), preserving all formatting."
             return json.dumps({"error": "Could not save file"})
@@ -1056,7 +1078,7 @@ class Tools:
                 prs.save(out)
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nCreated new {ftype.upper()} file."
             return json.dumps({"error": "Could not save file"})
@@ -1175,7 +1197,7 @@ class Tools:
             doc.save(out)
             out.seek(0)
             fname = output_filename or f"{title.replace(' ', '_')}.docx"
-            url, name = self._save_and_link(out.read(), fname)
+            url, name = await self._save_and_link(out.read(), fname, __request__)
             if url:
                 return f"[{name}]({url})\n\nProfessional document generated."
             return json.dumps({"error": "Could not save file"})
@@ -1491,7 +1513,7 @@ class Tools:
             prs.save(out)
             out.seek(0)
             fname = output_filename or "presentation.pptx"
-            url, name = self._save_and_link(out.read(), fname)
+            url, name = await self._save_and_link(out.read(), fname, __request__)
             if url:
                 return f"[{name}]({url})\n\nPresentation with {len(slides_data)} slides."
             return json.dumps({"error": "Could not save file"})
@@ -1751,7 +1773,7 @@ class Tools:
             wb.save(out)
             out.seek(0)
             fname = output_filename or f"{title.replace(' ', '_')}.xlsx"
-            url, name = self._save_and_link(out.read(), fname)
+            url, name = await self._save_and_link(out.read(), fname, __request__)
             if url:
                 return f"[{name}]({url})\n\nProfessional workbook with {len(sheets_spec)} sheets generated."
             return json.dumps({"error": "Could not save file"})
@@ -1767,7 +1789,7 @@ class Tools:
         """
         try:
             import sqlite3 as s3
-            conn2 = s3.connect(r"_DB_PATH")
+            conn2 = s3.connect(_DB_PATH)
             row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
             if not row:
                 row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
@@ -1820,7 +1842,7 @@ class Tools:
             out = io.BytesIO()
             doc.save(out)
             out.seek(0)
-            url, name = self._save_and_link(out.read(), out_name)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nTracked changes by '{author}':\n" + "\n".join(results)
             return json.dumps({"error": "Could not save file"})
@@ -1832,7 +1854,7 @@ class Tools:
         try:
             import sqlite3 as s3, openpyxl, io, os
             from copy import copy
-            conn2 = s3.connect(r"_DB_PATH")
+            conn2 = s3.connect(_DB_PATH)
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             wb_out = openpyxl.Workbook()
             wb_out.remove(wb_out.active)
@@ -1875,7 +1897,7 @@ class Tools:
             wb_out.save(out)
             out.seek(0)
             fname = output_filename or "merged_workbook.xlsx"
-            url, name = self._save_and_link(out.read(), fname)
+            url, name = await self._save_and_link(out.read(), fname, __request__)
             if url:
                 return f"[{name}]({url})\n\nMerged {merged} sheets from {len(ids)} files."
             return json.dumps({"error": "Could not save file"})
@@ -1904,7 +1926,7 @@ class Tools:
     async def auto_backup(self, __user__=None, __request__=None) -> str:
         try:
             import shutil, datetime
-            db_path = r"_DB_PATH"
+            db_path = _DB_PATH
             backup_dir = os.path.join(os.path.expanduser("~"), "open-webui", "backups")
             os.makedirs(backup_dir, exist_ok=True)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1921,7 +1943,7 @@ class Tools:
     async def merge_pdfs(self, file_ids: str, output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
             import fitz, sqlite3 as s3, io, os
-            conn2 = s3.connect(r"_DB_PATH")
+            conn2 = s3.connect(_DB_PATH)
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             merger = fitz.open()
             count = 0
@@ -1950,7 +1972,7 @@ class Tools:
             merger.close()
             out.seek(0)
             fname = output_filename or "merged.pdf"
-            url, name = self._save_and_link(out.read(), fname)
+            url, name = await self._save_and_link(out.read(), fname, __request__)
             if url:
                 return f"[{name}]({url})\n\nMerged {count} PDFs into one file."
             return json.dumps({"error": "Could not save file"})
@@ -1960,7 +1982,7 @@ class Tools:
     async def split_pdf(self, file_id: str, pages_per_file: int = 1, output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
             import fitz, sqlite3 as s3, io, os
-            conn2 = s3.connect(r"_DB_PATH")
+            conn2 = s3.connect(_DB_PATH)
             row = conn2.execute("SELECT meta FROM file WHERE id=?", (file_id,)).fetchone()
             if not row:
                 row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+file_id+"%",)).fetchone()
@@ -1987,7 +2009,7 @@ class Tools:
                 sub.close()
                 out.seek(0)
                 part_name = f"part_{start+1}_{end}.pdf"
-                url, name = self._save_and_link(out.read(), part_name)
+                url, name = await self._save_and_link(out.read(), part_name, __request__)
                 if url:
                     urls.append(f"[{name}]({url})")
             src.close()
@@ -2000,13 +2022,13 @@ class Tools:
     async def tool_stats(self, __user__=None, __request__=None) -> str:
         try:
             import sqlite3 as s3
-            conn2 = s3.connect(r"_DB_PATH")
+            conn2 = s3.connect(_DB_PATH)
             tool_count = conn2.execute("SELECT COUNT(*) FROM tool WHERE is_active=1").fetchone()[0]
             func_count = conn2.execute("SELECT COUNT(*) FROM function WHERE is_active=1").fetchone()[0]
             model_count = conn2.execute("SELECT COUNT(*) FROM model WHERE is_active=1").fetchone()[0]
             exports_dir = os.path.join(os.path.expanduser("~"), "open-webui", "exports")
             export_count = len([f for f in os.listdir(exports_dir) if os.path.isfile(os.path.join(exports_dir, f))]) if os.path.exists(exports_dir) else 0
-            db_size_kb = os.path.getsize(r"_DB_PATH") / 1024
+            db_size_kb = os.path.getsize(_DB_PATH) / 1024
             conn2.close()
             return json.dumps({
                 "tools": tool_count,
@@ -2023,7 +2045,7 @@ class Tools:
         """List, accept_all or reject_all tracked changes in a Word document."""
         try:
             import sqlite3 as s3
-            conn2 = s3.connect(r"_DB_PATH")
+            conn2 = s3.connect(_DB_PATH)
             row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
             if not row:
                 row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
@@ -2070,7 +2092,7 @@ class Tools:
             out = io.BytesIO()
             rdoc.save(out)
             out.seek(0)
-            url, name = self._save_and_link(out.read(), out_name)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\n{msg}."
             return json.dumps({"error": "Could not save file"})

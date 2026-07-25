@@ -145,12 +145,36 @@ Ana,30,Lisbon"
 "Create a PowerPoint with 3 slides about Q3 results"
 ```
 
-## File Server
-The tool saves generated files to a local `exports/` directory and serves them via a simple HTTP server on port 9000. Run:
-```bash
-python file_server.py
+
+## Base URL and Proxy Setup
+
+When the tool saves generated files, it creates download links. The base URL for these links is resolved in this order:
+
+1. **Valve setting** — Set `base_url` in the tool configuration in Open WebUI (e.g., `https://your-domain.com`)
+2. **X-Original-Host header** — If running behind a reverse proxy (e.g., Nginx, Caddy), the tool reads the `X-Original-Host` header from the incoming request
+3. **WEBUI_URL env var** — Falls back to the `WEBUI_URL` environment variable
+4. **Default** — `http://localhost:3000`
+
+### Reverse Proxy Configuration
+
+If you run Open WebUI behind a reverse proxy, ensure the proxy passes the original host header:
+
+**Nginx:**
+```nginx
+proxy_set_header X-Original-Host $host;
 ```
-Files will be downloadable at `http://localhost:9000/filename.xlsx`
+
+**Caddy:**
+```
+header_up X-Original-Host {host}
+```
+
+**Apache:**
+```apache
+ProxyPreserveHost On
+```
+
+Without this header, download links will use `localhost:3000` and won't work from other machines.
 
 ## Dependencies
 - `openpyxl` — Excel .xlsx read/write

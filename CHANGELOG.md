@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added support for VPS / server installations: 
+Now tool use Open WebUI API for file storage (`/api/v1/files/{id}/content`) instead of local export directory + custom HTTP file server. 
+- Added `base_url` Valve for overriding download link base URL
+- Added support for download link generation behind CDN/Proxy. Proxy url can be passed via `X-Original-Host` header and will be used to generate download link
+- Bump tool.py meta to 3.0.0 (since prev downloading logic was replaced with more webui-native approach)
 - `requirements.txt` for dependency management
 - `CHANGELOG.md` to track project history
 - Expanded `.gitignore` with test file exceptions
