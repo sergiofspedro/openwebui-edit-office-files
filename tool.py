@@ -18,6 +18,28 @@ from copy import copy
 from typing import Optional, List, Dict, Any
 
 
+def _get_owui_data_dir() -> str:
+    """Return the Open WebUI data directory for the current OS."""
+    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
+    if data_dir:
+        return data_dir
+    home = os.path.expanduser("~")
+    if platform.system() == "Windows":
+        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data")
+    else:
+        return os.path.join(home, "Library", "Application Support", "open-webui", "data")
+
+def _get_owui_uploads_dir() -> str:
+    """Return the Open WebUI uploads directory for the current OS."""
+    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
+    if data_dir:
+        return os.path.join(data_dir, "data", "uploads")
+    home = os.path.expanduser("~")
+    if platform.system() == "Windows":
+        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data", "uploads")
+    else:
+        return os.path.join(home, "Library", "Application Support", "open-webui", "data", "uploads")
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -269,28 +291,6 @@ def _format_text(text: str) -> str:
     return text
 
 
-
-def _get_owui_data_dir() -> str:
-    """Return the Open WebUI data directory for the current OS."""
-    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
-    if data_dir:
-        return data_dir
-    home = os.path.expanduser("~")
-    if platform.system() == "Windows":
-        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data")
-    else:
-        return os.path.join(home, "Library", "Application Support", "open-webui", "data")
-
-def _get_owui_uploads_dir() -> str:
-    """Return the Open WebUI uploads directory for the current OS."""
-    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
-    if data_dir:
-        return os.path.join(data_dir, "data", "uploads")
-    home = os.path.expanduser("~")
-    if platform.system() == "Windows":
-        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data", "uploads")
-    else:
-        return os.path.join(home, "Library", "Application Support", "open-webui", "data", "uploads")
 
 # =========================================================================
 class Tools:
