@@ -145,20 +145,24 @@ def _read_file_bytes(file_id: str) -> Optional[bytes]:
 
 
 def _detect_type(filename: str) -> str:
-    """Detect Office file type from filename."""
-    lower = filename.lower()
-    if lower.endswith(".xlsx"):
+    """Detect file type from extension."""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in (".xlsx",):
         return "xlsx"
-    if lower.endswith(".xls"):
+    if ext in (".xls",):
         return "xls"
-    if lower.endswith(".docx"):
+    if ext in (".docx",):
         return "docx"
-    if lower.endswith(".doc"):
-        return "doc"
-    if lower.endswith(".pptx"):
+    if ext in (".pptx",):
         return "pptx"
-    if lower.endswith(".ppt"):
+    if ext in (".ppt",):
         return "ppt"
+    if ext in (".odt",):
+        return "odt"
+    if ext in (".ods",):
+        return "ods"
+    if ext in (".odp",):
+        return "odp"
     return "unknown"
 
 
@@ -330,53 +334,70 @@ def _read_odf(file_bytes: bytes, filename: str) -> str:
     """Read ODF files (.odt, .ods, .odp) and return structured text."""
     ext = os.path.splitext(filename)[1].lower()
     
-    if ext == ".ods":
-        from odf.opendocument import load
-        from odf.table import Table, TableRow, TableCell
-        from odf.text import P
+    try:
+        if ext == ".ods":
+            from odf.opendocument import load
+            from odf.table import Table, TableRow, TableCell
+            from odf.text import P
+            
+            doc = load(io.BytesIO(file_bytes))
+            result = []
+            for table in doc.getElementsByType(Table):
+                for row in table.getElementsByType(TableRow):
+                    cells = []
+                    for cell in row.getElementsByType(TableCell):
+                        text_parts = []
+                        for p in cell.getElementsByType(P):
+                            try:
+                                text_parts.append(str(p))
+                            except Exception:
+                                pass
+                        cells.append(" ".join(text_parts).strip())
+                    result.append(" | ".join(cells))
+            return "\n".join(result) if result else "(empty spreadsheet)"
         
-        doc = load(io.BytesIO(file_bytes))
-        result = []
-        for table in doc.getElementsByType(Table):
-            for row in table.getElementsByType(TableRow):
-                cells = []
-                for cell in row.getElementsByType(TableCell):
-                    text_parts = []
-                    for p in cell.getElementsByType(P):
-                        text_parts.append(str(p))
-                    cells.append(" ".join(text_parts).strip())
-                result.append(" | ".join(cells))
-        return "\n".join(result)
-    
-    elif ext == ".odt":
-        from odf.opendocument import load
-        from odf.text import P, H
+        elif ext == ".odt":
+            from odf.opendocument import load
+            from odf.text import P, H
+            
+            doc = load(io.BytesIO(file_bytes))
+            result = []
+            for elem in doc.getElementsByType(H):
+                try:
+                    result.append(f"## {str(elem)}")
+                except Exception:
+                    pass
+            for elem in doc.getElementsByType(P):
+                try:
+                    text = str(elem).strip()
+                    if text:
+                        result.append(text)
+                except Exception:
+                    pass
+            return "\n\n".join(result) if result else "(empty document)"
         
-        doc = load(io.BytesIO(file_bytes))
-        result = []
-        for elem in doc.getElementsByType(H):
-            result.append(f"## {str(elem)}")
-        for elem in doc.getElementsByType(P):
-            text = str(elem).strip()
-            if text:
-                result.append(text)
-        return "\n\n".join(result)
-    
-    elif ext == ".odp":
-        from odf.opendocument import load
-        from odf.text import P
+        elif ext == ".odp":
+            from odf.opendocument import load
+            from odf.text import P
+            
+            doc = load(io.BytesIO(file_bytes))
+            result = []
+            slide_num = 0
+            for elem in doc.getElementsByType(P):
+                try:
+                    text = str(elem).strip()
+                    if text:
+                        result.append(f"Slide {slide_num + 1}: {text}")
+                        slide_num += 1
+                except Exception:
+                    pass
+            return "\n".join(result) if result else "(empty presentation)"
         
-        doc = load(io.BytesIO(file_bytes))
-        result = []
-        slide_num = 0
-        for elem in doc.getElementsByType(P):
-            text = str(elem).strip()
-            if text:
-                result.append(f"Slide {slide_num + 1}: {text}")
-                slide_num += 1
-        return "\n".join(result)
-    
-    return f"Unsupported ODF format: {ext}"
+        return f"Unsupported ODF format: {ext}"
+    except ImportError:
+        return "Error: odfpy library not installed. Install with: pip install odfpy"
+    except Exception as e:
+        return f"Error reading {ext} file: {str(e)}"
 
 # =========================================================================
 class Tools:
