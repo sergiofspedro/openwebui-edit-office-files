@@ -399,6 +399,138 @@ def _read_odf(file_bytes: bytes, filename: str) -> str:
     except Exception as e:
         return f"Error reading {ext} file: {str(e)}"
 
+
+
+# ---------------------------------------------------------------------------
+# Professional document helpers
+# ---------------------------------------------------------------------------
+def _add_callout_box(doc, lines, colors, hex_to_rgb):
+    """Add a professional callout box (note/tip/warning)."""
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn, nsdecls
+    from docx.oxml import parse_xml
+
+    first_line = lines[0].lower() if lines else ""
+    if first_line.startswith("**warning") or first_line.startswith("**alert"):
+        border_color = "E74C3C"
+        bg_color = "FDEDEC"
+        icon = "\u26a0\ufe0f"
+    elif first_line.startswith("**tip") or first_line.startswith("**pro tip"):
+        border_color = "27AE60"
+        bg_color = "E8F8F5"
+        icon = "\U0001f4a1"
+    elif first_line.startswith("**note") or first_line.startswith("**info") or True:
+        border_color = colors.get("accent", "2E75B6")
+        bg_color = colors.get("light", "D6E4F0")
+        icon = "\U0001f4cc"
+
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = 1
+    cell = table.rows[0].cells[0]
+    cell.width = Inches(6.0)
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+
+    shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg_color}" w:val="clear"/>')
+    tcPr.append(shading)
+
+    borders = parse_xml(
+        f'<w:tcBorders {nsdecls("w")}>'
+        f'<w:left w:val="single" w:sz="24" w:space="8" w:color="{border_color}"/>'
+        f'<w:top w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+        f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+        f'<w:right w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+        f'</w:tcBorders>'
+    )
+    tcPr.append(borders)
+
+    for i, line in enumerate(lines):
+        text = _format_text(line)
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+        if i == 0:
+            p = cell.paragraphs[0]
+            p.paragraph_format.space_before = Pt(6)
+            run = p.add_run(f"{icon} {text}")
+            run.font.size = Pt(11)
+            run.font.bold = True
+            run.font.name = 'Calibri'
+        else:
+            p = cell.add_paragraph()
+            p.paragraph_format.space_before = Pt(2)
+            run = p.add_run(text)
+            run.font.size = Pt(10)
+            run.font.name = 'Calibri'
+
+    doc.add_paragraph()
+
+
+def _add_professional_table(doc, rows, colors, hex_to_rgb):
+    """Add a professionally styled table."""
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.oxml.ns import qn, nsdecls
+    from docx.oxml import parse_xml
+
+    if not rows:
+        return
+
+    num_cols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=num_cols)
+    table.style = 'Colorful Grid Accent 1'
+    table.alignment = 1
+
+    for i, row_data in enumerate(rows):
+        for j, cell_text in enumerate(row_data):
+            if j < num_cols:
+                cell = table.rows[i].cells[j]
+                cell.text = _format_text(cell_text)
+                for paragraph in cell.paragraphs:
+                    paragraph.paragraph_format.space_before = Pt(2)
+                    paragraph.paragraph_format.space_after = Pt(2)
+                    for run in paragraph.runs:
+                        run.font.size = Pt(10)
+                        run.font.name = 'Calibri'
+                        if i == 0:
+                            run.font.bold = True
+
+    doc.add_paragraph()
+
+
+def _render_content_slide(prs, lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_num):
+    """Render a content slide with professional layout."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    set_slide_bg(slide, colors["bg"])
+
+    y_pos = 0.5
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        if line.startswith('# ') or line.startswith('## '):
+            text = _format_text(line.lstrip('#').strip())
+            add_accent_bar(slide, 0.8, y_pos + 0.15, 0.06, 0.5, colors["accent"])
+            add_text_box(slide, 1.1, y_pos, 11, 0.7, text, font_size=28, bold=True, color=colors["text"])
+            y_pos += 0.9
+        elif line.startswith('- ') or line.startswith('* '):
+            text = _format_text(line[2:].strip())
+            add_text_box(slide, 1.5, y_pos, 10.5, 0.5, "\u2022 " + text, font_size=16, color=colors["text"])
+            y_pos += 0.5
+        elif line.startswith('|'):
+            cells = [c.strip() for c in line.split('|')[1:-1]]
+            if any(c.startswith('---') for c in cells):
+                continue
+            add_text_box(slide, 1.0, y_pos, 11, 0.5, "  |  ".join(cells), font_size=14, color=colors["text"])
+            y_pos += 0.4
+        else:
+            text = _format_text(line)
+            add_text_box(slide, 1.0, y_pos, 11.5, 0.5, text, font_size=16, color=colors["text"])
+            y_pos += 0.5
+
+        if y_pos > 6.5:
+            break
+
+
 # =========================================================================
 class Tools:
     class Valves(BaseModel):
@@ -1215,699 +1347,404 @@ class Tools:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
 
-    async def generate_document(self, content: str, template: str = "", accent: str = "", output_filename: str = "", __user__=None, __request__=None) -> str:
-        """Generate a professional .docx document with optional cover page, callouts, signatures, headers/footers, and styled headings.
-        Uses YAML front matter (--- delimited) for metadata: title, author, header, footer, cover (page).
-        Body supports markdown headings (# ## ###), callout blocks (::: callout type="info" title="..."), signatures (::: signature name="..." role="..."), and [[toc]] placeholder.
-        Template 'report' enables cover page automatically. Accent color applied to headings and title."""
+    async def generate_document(self, content: str, title: str = "Document", theme: str = "professional", __user__=None, __request__=None) -> str:
+        """Generate a professional Word document with modern styling and themes.
+
+        Args:
+            content: Markdown-formatted content
+            title: Document title (used for cover page and filename)
+            theme: Visual theme - professional, modern, creative, corporate, minimal, elegant
+        Returns:
+            Markdown link to the generated file
+        """
         try:
             from docx import Document
-            from docx.shared import Pt, Inches, Cm, RGBColor
+            from docx.shared import Inches, Pt, Cm, RGBColor, Emu
             from docx.enum.text import WD_ALIGN_PARAGRAPH
-            import re as _re
-            
-            acc = accent or getattr(self.valves, 'default_accent', '#1B6B93')
-            r, g, b = int(acc[1:3], 16), int(acc[3:5], 16), int(acc[5:7], 16)
-            
+            from docx.enum.table import WD_TABLE_ALIGNMENT
+            from docx.oxml.ns import qn, nsdecls
+            from docx.oxml import parse_xml
+            import datetime
+
             doc = Document()
+
+            # --- Page Setup ---
+            section = doc.sections[0]
+            section.top_margin = Cm(2.0)
+            section.bottom_margin = Cm(2.0)
+            section.left_margin = Cm(2.5)
+            section.right_margin = Cm(2.5)
+
+            # --- Color Themes ---
+            themes = {
+                "professional": {"primary": "1F4E79", "accent": "2E75B6", "light": "D6E4F0", "text": "333333"},
+                "modern": {"primary": "2D3436", "accent": "6C5CE7", "light": "DFE6E9", "text": "2D3436"},
+                "creative": {"primary": "E17055", "accent": "FDCB6E", "light": "FFF3E0", "text": "2D3436"},
+                "corporate": {"primary": "003366", "accent": "CC0000", "light": "E8EEF4", "text": "1A1A1A"},
+                "minimal": {"primary": "000000", "accent": "666666", "light": "F5F5F5", "text": "333333"},
+                "elegant": {"primary": "4A235A", "accent": "8E44AD", "light": "F3E5F5", "text": "1A1A1A"},
+            }
+            colors = themes.get(theme, themes["professional"])
+
+            def hex_to_rgb(hex_color):
+                return RGBColor(int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16))
+
+            # --- Default Font ---
             style = doc.styles['Normal']
-            style.font.name = 'Calibri'
-            style.font.size = Pt(11)
-            
-            parsed = content
-            title = "Document"
-            author_name = getattr(self.valves, 'default_author', '')
-            header_text = ""
-            footer_text = ""
-            has_cover = False
-            
-            if content.startswith('---'):
-                parts = content.split('---', 2)
-                if len(parts) >= 3:
-                    yaml_text = parts[1]
-                    parsed = parts[2]
-                    for line in yaml_text.strip().split('\n'):
-                        if ':' in line:
-                            k, v = line.split(':', 1)
-                            k, v = k.strip().lower(), v.strip()
-                            if k == 'title': title = v
-                            elif k == 'cover' and v.lower() != 'none': has_cover = True
-                            elif k == 'author': author_name = v
-                            elif k == 'header': header_text = v
-                            elif k == 'footer': footer_text = v
-            
-            if has_cover or template == 'report':
-                for _ in range(8):
-                    doc.add_paragraph()
-                p = doc.add_paragraph()
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                run = p.add_run(title)
-                run.font.size = Pt(28)
-                run.font.color.rgb = RGBColor(r, g, b)
-                run.bold = True
-                if author_name:
-                    p3 = doc.add_paragraph()
-                    p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    p3.add_run(f"By {author_name}").font.size = Pt(11)
-                doc.add_page_break()
-            
-            if header_text:
-                hp = doc.sections[0].header.paragraphs[0]
-                hp.text = header_text
-                hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            if footer_text:
-                fp = doc.sections[0].footer.paragraphs[0]
-                fp.text = footer_text
-                fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
-            for raw in parsed.strip().split('\n'):
-                line = raw.strip()
-                if line.startswith('```'):
+            font = style.font
+            font.name = 'Calibri'
+            font.size = Pt(11)
+            font.color.rgb = hex_to_rgb(colors["text"])
+            style.paragraph_format.space_after = Pt(8)
+            style.paragraph_format.line_spacing = 1.15
+
+            # --- Heading Styles ---
+            for i in range(1, 4):
+                heading_style = doc.styles['Heading %d' % i]
+                heading_style.font.name = 'Calibri'
+                heading_style.font.color.rgb = hex_to_rgb(colors["primary"])
+                if i == 1:
+                    heading_style.font.size = Pt(24)
+                    heading_style.paragraph_format.space_before = Pt(24)
+                    heading_style.paragraph_format.space_after = Pt(12)
+                elif i == 2:
+                    heading_style.font.size = Pt(18)
+                    heading_style.paragraph_format.space_before = Pt(18)
+                    heading_style.paragraph_format.space_after = Pt(8)
+                else:
+                    heading_style.font.size = Pt(14)
+                    heading_style.paragraph_format.space_before = Pt(12)
+                    heading_style.paragraph_format.space_after = Pt(6)
+
+            # --- Cover Page ---
+            cover_table = doc.add_table(rows=1, cols=1)
+            cover_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            cell = cover_table.rows[0].cells[0]
+            cell.width = Inches(6.5)
+            shading_elm = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["primary"]}"/>')
+            cell._tc.get_or_add_tcPr().append(shading_elm)
+
+            p = cell.paragraphs[0]
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(40)
+            p.paragraph_format.space_after = Pt(8)
+            run = p.add_run(_format_text(title))
+            run.font.size = Pt(28)
+            run.font.bold = True
+            run.font.color.rgb = RGBColor(255, 255, 255)
+            run.font.name = 'Calibri'
+
+            p = cell.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_after = Pt(30)
+            run = p.add_run(datetime.datetime.now().strftime("%B %d, %Y"))
+            run.font.size = Pt(12)
+            run.font.color.rgb = RGBColor(200, 200, 200)
+            run.font.name = 'Calibri'
+
+            doc.add_paragraph()
+
+            # --- Process Content ---
+            lines = content.split('\n')
+            table_rows = []
+            callout_lines = []
+
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    if callout_lines:
+                        _add_callout_box(doc, callout_lines, colors, hex_to_rgb)
+                        callout_lines = []
                     continue
-                if line == '[[toc]]':
-                    p = doc.add_paragraph('[Table of Contents - update in Word]')
-                    p.runs[0].italic = True
+
+                if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
+                    level = line.count('#')
+                    text = _format_text(line.lstrip('#').strip())
+                    doc.add_heading(text, level=min(level, 3))
                     continue
-                h_match = _re.match(r'^(#{1,3})\s+(.*)', line)
-                if h_match:
-                    lvl = len(h_match.group(1))
-                    heading = doc.add_heading(_format_text(h_match.group(2)), level=lvl)
-                    heading.runs[0].font.color.rgb = RGBColor(r, g, b) if lvl <= 2 else RGBColor(0, 0, 0)
+
+                if line.startswith('> '):
+                    callout_lines.append(line[2:])
                     continue
-                if line.startswith('::: callout'):
-                    m = _re.match(r'::: callout type="(\w+)" title="(.+?)"', line)
-                    if m:
-                        colors = {'info': (33,150,243), 'success': (76,175,80), 'warning': (255,152,0), 'danger': (244,67,54)}
-                        cc = colors.get(m.group(1), (33,150,243))
-                        p = doc.add_paragraph()
-                        p.paragraph_format.left_indent = Cm(0.5)
-                        r1 = p.add_run(f"{m.group(1).upper()}: {m.group(2)}")
-                        r1.bold = True
-                        r1.font.color.rgb = RGBColor(*cc)
+                elif callout_lines:
+                    _add_callout_box(doc, callout_lines, colors, hex_to_rgb)
+                    callout_lines = []
+
+                if line.startswith('|') and line.endswith('|'):
+                    cells = [c.strip() for c in line.split('|')[1:-1]]
+                    if all(c.startswith('---') for c in cells):
                         continue
-                if line.startswith('::: signature'):
-                    m = _re.match(r'::: signature name="(.+?)"\s*(?:role="(.+?)")?', line)
-                    if m:
-                        p = doc.add_paragraph()
-                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                        p.add_run(m.group(1)).bold = True
-                        if m.group(2):
-                            p2 = doc.add_paragraph()
-                            p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                            p2.add_run(m.group(2))
-                        continue
-                if line.startswith(':::') or line == ':::':
+                    table_rows.append(cells)
                     continue
-                if line:
-                    doc.add_paragraph(_format_text(line))
-            
+                elif table_rows:
+                    _add_professional_table(doc, table_rows, colors, hex_to_rgb)
+                    table_rows = []
+
+                if line.startswith('- ') or line.startswith('* '):
+                    text = _format_text(line[2:].strip())
+                    doc.add_paragraph(text, style='List Bullet')
+                    continue
+
+                if re.match(r'^\d+\.\s', line):
+                    text = _format_text(re.sub(r'^\d+\.\s', '', line))
+                    doc.add_paragraph(text, style='List Number')
+                    continue
+
+                text = _format_text(line)
+                doc.add_paragraph(text)
+
+            if table_rows:
+                _add_professional_table(doc, table_rows, colors, hex_to_rgb)
+
+            # --- Footer with page numbers ---
+            footer = section.footer
+            footer.is_linked_to_previous = False
+            p = footer.paragraphs[0]
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run("Page ")
+            run.font.size = Pt(8)
+            run.font.color.rgb = hex_to_rgb(colors["accent"])
+            fldChar1 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
+            run._r.append(fldChar1)
+            instrText = parse_xml(f'<w:instrText {nsdecls("w")} xml:space="preserve"> PAGE </w:instrText>')
+            run._r.append(instrText)
+            fldChar2 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>')
+            run._r.append(fldChar2)
+
             out = io.BytesIO()
             doc.save(out)
             out.seek(0)
-            fname = output_filename or f"{title.replace(' ', '_')}.docx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, fname = await self._save_and_link(out.getvalue(), "%s.docx" % title, __request__)
             if url:
-                return f"[{name}]({url})\n\nProfessional document generated."
+                return "Document created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
-    async def generate_slides(self, content: str, theme: str = "", accent: str = "", output_filename: str = "", __user__=None, __request__=None) -> str:
-        """Generate a professional .pptx presentation from JSON slide spec or plain text.
-        JSON format: {"slides": [{"layout": "cover|title_bullets|kpi_row|chart|closing", "title": "...", ...}]}
-        Layouts: cover (title+subtitle), title_bullets (title + body/bullets), kpi_row (stat cards with value/label/change), chart (bar chart from labels/values), closing (title + takeaways).
-        Themes: midnight, charcoal, slate, coral, forest, ocean (or custom accent).
-        If content is plain text, auto-wraps as a title_bullets slide."""
+    async def generate_slides(self, content: str, title: str = "Presentation", theme: str = "modern", __user__=None, __request__=None) -> str:
+        """Generate professional PowerPoint slides with modern design.
+
+        Args:
+            content: Markdown content (headings become slides, bullets become content)
+            title: Presentation title for the first slide
+            theme: Visual theme - modern, light, dark, corporate, creative, minimal
+        Returns:
+            Markdown link to the generated file
+        """
         try:
             from pptx import Presentation
-            from pptx.util import Inches, Pt
-            from pptx.enum.text import PP_ALIGN
+            from pptx.util import Inches, Pt, Emu, Cm
             from pptx.dml.color import RGBColor
-            from pptx.chart.data import CategoryChartData
-            
-            acc = accent or getattr(self.valves, 'default_accent', '#1B6B93')
-            r, g, b = int(acc[1:3], 16), int(acc[3:5], 16), int(acc[5:7], 16)
-            thm = theme or getattr(self.valves, 'default_theme', 'auto')
-            
-            slides_data = []
-            try:
-                spec = json.loads(content)
-                slides_data = spec.get('slides', [])
-            except Exception:
-                slides_data = [{'layout': 'title_bullets', 'title': 'Presentation', 'body': content}]
-            
+            from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+            from pptx.enum.shapes import MSO_SHAPE
+            import datetime
+
             prs = Presentation()
             prs.slide_width = Inches(13.333)
             prs.slide_height = Inches(7.5)
-            
-            theme_colors = {
-                'midnight': (18, 18, 36),
-                'charcoal': (30, 30, 30),
-                'slate': (40, 50, 60),
-                'coral': (255, 100, 80),
-                'forest': (30, 80, 40),
-                'ocean': (20, 60, 100)
+
+            # --- Color Themes ---
+            themes = {
+                "modern": {"bg": "1A1A2E", "accent": "E94560", "text": "FFFFFF", "subtitle": "B0B0B0", "card": "16213E"},
+                "light": {"bg": "FFFFFF", "accent": "2563EB", "text": "1E293B", "subtitle": "64748B", "card": "F1F5F9"},
+                "dark": {"bg": "0F172A", "accent": "38BDF8", "text": "F8FAFC", "subtitle": "94A3B8", "card": "1E293B"},
+                "corporate": {"bg": "FFFFFF", "accent": "003366", "text": "1A1A1A", "subtitle": "666666", "card": "F0F4F8"},
+                "creative": {"bg": "FFF8F0", "accent": "FF6B6B", "text": "2D3436", "subtitle": "636E72", "card": "FFEAA7"},
+                "minimal": {"bg": "FAFAFA", "accent": "000000", "text": "333333", "subtitle": "999999", "card": "F0F0F0"},
             }
-            bg = theme_colors.get(thm, (18, 18, 36))
-            
-            for ss in slides_data:
-                layout = ss.get('layout', 'title_bullets')
-                stitle = ss.get('title', 'Slide')
-                slide = prs.slides.add_slide(prs.slide_layouts[6])
-                slide.background.fill.solid()
-                slide.background.fill.fore_color.rgb = RGBColor(*bg)
-                
-                if layout == 'cover':
-                    tb = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11), Inches(2))
-                    p = tb.text_frame.paragraphs[0]
-                    p.text = _format_text(stitle)
-                    p.font.size = Pt(44)
-                    p.font.color.rgb = RGBColor(255, 255, 255)
-                    p.font.bold = True
-                    p.alignment = PP_ALIGN.CENTER
-                    iu = ss.get('image_url',ss.get('image_hint',''))
-                    if iu:
-                        tb3 = slide.shapes.add_textbox(Inches(2),Inches(6),Inches(9),Inches(0.5))
-                        p3 = tb3.text_frame.paragraphs[0]
-                        p3.text = 'Image: '+iu
-                        p3.font.size = Pt(10)
-                        p3.font.color.rgb = RGBColor(150,150,150)
-                        p3.font.italic = True
-                    if 'subtitle' in ss:
-                        tb2 = slide.shapes.add_textbox(Inches(2), Inches(5), Inches(9), Inches(1))
-                        p2 = tb2.text_frame.paragraphs[0]
-                        p2.text = _format_text(ss['subtitle'])
-                        p2.font.size = Pt(18)
-                        p2.font.color.rgb = RGBColor(200, 200, 200)
-                        p2.alignment = PP_ALIGN.CENTER
-                
-                elif layout == 'kpi_row':
-                    stats = ss.get('stats', [])
-                    for idx, stat in enumerate(stats[:4]):
-                        shape = slide.shapes.add_shape(1, Inches(0.5 + idx * 3.2), Inches(2.5), Inches(3), Inches(2.5))
-                        shape.fill.solid()
-                        shape.fill.fore_color.rgb = RGBColor(255, 255, 255)
-                        shape.line.fill.background()
-                        tf = shape.text_frame
-                        p = tf.paragraphs[0]
-                        p.text = _format_text(str(stat.get('value', '')))
-                        p.font.size = Pt(32)
-                        p.font.bold = True
-                        p.font.color.rgb = RGBColor(r, g, b)
-                        p.alignment = PP_ALIGN.CENTER
-                        p2 = tf.add_paragraph()
-                        p2.text = _format_text(stat.get('label', ''))
-                        p2.font.size = Pt(12)
-                        p2.font.color.rgb = RGBColor(100, 100, 100)
-                        p2.alignment = PP_ALIGN.CENTER
-                        if 'change' in stat:
-                            p3 = tf.add_paragraph()
-                            p3.text = _format_text(stat['change'])
-                            p3.font.size = Pt(14)
-                            p3.font.color.rgb = RGBColor(76, 175, 80) if '+' in stat['change'] else RGBColor(244, 67, 54)
-                            p3.alignment = PP_ALIGN.CENTER
-                
-                elif layout == 'chart':
-                    labels = ss.get('labels', [])
-                    values = ss.get('values', [])
-                    cd = CategoryChartData()
-                    cd.categories = labels
-                    cd.add_series('Values', values)
-                    _chart_types = {
-                        'column': 2, 'bar': 51, 'line': 4, 'pie': 5,
-                        'area': 76, 'scatter': 74, 'radar': 10,
-                        'doughnut': -4121, 'bubble': 15, 'stock': 88,
-                    }
-                    _ct = ss.get('chart_type', 'column')
-                    _chart_enum = _chart_types.get(_ct, 2)
-                    chart = slide.shapes.add_chart(_chart_enum, Inches(1), Inches(1.5), Inches(11), Inches(5), cd).chart
-                    chart.has_legend = False
-                
-                elif layout == 'title_bullets':
-                    tb = slide.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1.2))
-                    p = tb.text_frame.paragraphs[0]
-                    p.text = _format_text(stitle)
-                    p.font.size = Pt(36)
-                    p.font.color.rgb = RGBColor(255, 255, 255)
-                    p.font.bold = True
-                    body = ss.get('body', ss.get('bullets', ''))
-                    if isinstance(body, list):
-                        body = '\n'.join(body)
-                    if body:
-                        tb2 = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(5))
-                        p2 = tb2.text_frame.paragraphs[0]
-                        p2.text = _format_text(body)
-                        p2.font.size = Pt(18)
-                        p2.font.color.rgb = RGBColor(220, 220, 220)
-                
-                elif layout == 'closing':
-                    tb = slide.shapes.add_textbox(Inches(2), Inches(2), Inches(9), Inches(2))
-                    p = tb.text_frame.paragraphs[0]
-                    p.text = _format_text(stitle)
-                    p.font.size = Pt(40)
-                    p.font.color.rgb = RGBColor(255, 255, 255)
-                    p.font.bold = True
-                    p.alignment = PP_ALIGN.CENTER
-                    for t in ss.get('takeaways', []):
-                        p2 = tb.text_frame.add_paragraph()
-                        p2.text = _format_text(f"  {t}")
-                        p2.font.size = Pt(16)
-                        p2.font.color.rgb = RGBColor(180, 180, 180)
-                        p2.alignment = PP_ALIGN.CENTER
+            colors = themes.get(theme, themes["modern"])
 
-                elif layout == 'section':
-                    tb = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11), Inches(3))
-                    p = tb.text_frame.paragraphs[0]
-                    num = ss.get('number', '')
-                    p.text = _format_text(f"{num}  {stitle}")
-                    p.font.size = Pt(36)
-                    p.font.bold = True
-                    p.font.color.rgb = RGBColor(255, 255, 255)
-                    p.alignment = PP_ALIGN.CENTER
-                    sub = slide.shapes.add_textbox(Inches(1), Inches(5), Inches(11), Inches(1.5))
-                    ps = sub.text_frame.paragraphs[0]
-                    ps.text = _format_text(ss.get('subtitle', ''))
-                    ps.font.size = Pt(18)
-                    ps.font.color.rgb = RGBColor(200, 200, 200)
-                    ps.alignment = PP_ALIGN.CENTER
+            def hex_to_rgb(h):
+                return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
-                elif layout == 'timeline':
-                    items = ss.get('items', [])
-                    for idx, item in enumerate(items):
-                        y = 1.5 + idx * 1.2
-                        tb = slide.shapes.add_textbox(Inches(1.5), Inches(y), Inches(10), Inches(1))
-                        p = tb.text_frame.paragraphs[0]
-                        time_str = item.get('time', '')
-                        label = item.get('label', item.get('title', ''))
-                        p.text = _format_text(f"{time_str}  |  {label}")
-                        p.font.size = Pt(18)
-                        p.font.color.rgb = RGBColor(255, 255, 255)
-                        if item.get('highlight', False):
-                            p.font.bold = True
+            def set_slide_bg(slide, color_hex):
+                background = slide.background
+                fill = background.fill
+                fill.solid()
+                fill.fore_color.rgb = hex_to_rgb(color_hex)
 
-                elif layout == 'icon_grid_2x2':
-                    items = ss.get('items', [])[:4]
-                    positions = [(1, 1.5), (6.5, 1.5), (1, 4.5), (6.5, 4.5)]
-                    for idx, item in enumerate(items):
-                        if idx >= len(positions):
-                            break
-                        x, y = positions[idx]
-                        icon = item.get('icon', '')
-                        title = item.get('title', '')
-                        desc = item.get('description', '')
-                        tb = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(5), Inches(2.5))
-                        tf = tb.text_frame
-                        tf.word_wrap = True
-                        p = tf.paragraphs[0]
-                        p.text = _format_text(f"{icon}  {title}")
-                        p.font.size = Pt(22)
-                        p.font.bold = True
-                        p.font.color.rgb = RGBColor(255, 255, 255)
-                        if desc:
-                            p2 = tf.add_paragraph()
-                            p2.text = _format_text(desc)
-                            p2.font.size = Pt(14)
-                            p2.font.color.rgb = RGBColor(180, 180, 180)
+            def add_text_box(slide, left, top, width, height, text, font_size=18, bold=False, color=None, alignment=PP_ALIGN.LEFT):
+                txBox = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                p = tf.paragraphs[0]
+                p.text = _format_text(text)
+                p.font.size = Pt(font_size)
+                p.font.bold = bold
+                p.font.color.rgb = hex_to_rgb(color or colors["text"])
+                p.font.name = 'Calibri'
+                p.alignment = alignment
+                return txBox
 
-                elif layout == 'pillars':
-                    items = ss.get('items', [])
-                    n = len(items)
-                    if n > 0:
-                        col_w = 10.0 / n
-                        for idx, item in enumerate(items):
-                            x = 1.5 + idx * (col_w + 0.5) if n <= 4 else 1 + idx * (11 / n)
-                            tb = slide.shapes.add_textbox(Inches(x), Inches(2), Inches(col_w - 0.3), Inches(4))
-                            tf = tb.text_frame
-                            tf.word_wrap = True
-                            p = tf.paragraphs[0]
-                            p.text = _format_text(item.get('icon', ''))
-                            p.font.size = Pt(36)
-                            p.alignment = PP_ALIGN.CENTER
-                            p2 = tf.add_paragraph()
-                            p2.text = _format_text(item.get('title', ''))
-                            p2.font.size = Pt(16)
-                            p2.font.bold = True
-                            p2.font.color.rgb = RGBColor(255, 255, 255)
-                            p2.alignment = PP_ALIGN.CENTER
-                            desc = item.get('description', '')
-                            if desc:
-                                p3 = tf.add_paragraph()
-                                p3.text = _format_text(desc)
-                                p3.font.size = Pt(12)
-                                p3.font.color.rgb = RGBColor(180, 180, 180)
-                                p3.alignment = PP_ALIGN.CENTER
+            def add_accent_bar(slide, left, top, width, height, color_hex):
+                shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
+                shape.fill.solid()
+                shape.fill.fore_color.rgb = hex_to_rgb(color_hex)
+                shape.line.fill.background()
+                return shape
 
-                elif layout == 'quote':
-                    q = ss.get('quote', '')
-                    author = ss.get('author', '')
-                    tb = slide.shapes.add_textbox(Inches(1.5), Inches(2.5), Inches(11), Inches(2.5))
-                    tf = tb.text_frame
-                    tf.word_wrap = True
-                    p = tf.paragraphs[0]
-                    p.text = _format_text(f"\u201c{q}\u201d")
-                    p.font.size = Pt(28)
-                    p.font.italic = True
-                    p.font.color.rgb = RGBColor(255, 255, 255)
-                    p.alignment = PP_ALIGN.CENTER
-                    if author:
-                        p2 = tf.add_paragraph()
-                        p2.text = _format_text(f"-- {author}")
-                        p2.font.size = Pt(16)
-                        p2.font.color.rgb = RGBColor(180, 180, 180)
-                        p2.alignment = PP_ALIGN.CENTER
+            # --- Slide 1: Title Slide ---
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            set_slide_bg(slide, colors["bg"])
 
-                elif layout == 'alert':
-                    lv = ss.get('level','info')
-                    cl = {'info':(33,150,243),'warning':(255,152,0),'danger':(244,67,54),'success':(76,175,80)}
-                    ac = cl.get(lv,(33,150,243))
-                    s = slide.shapes.add_shape(1,Inches(0),Inches(0),Inches(0.2),Inches(7.5))
-                    s.fill.solid()
-                    s.fill.fore_color.rgb = RGBColor(*ac)
-                    s.line.fill.background()
-                    tb = slide.shapes.add_textbox(Inches(1),Inches(1),Inches(11),Inches(1))
-                    p = tb.text_frame.paragraphs[0]
-                    p.text = _format_text(lv.upper()+': '+stitle)
-                    p.font.size = Pt(32)
-                    p.font.color.rgb = RGBColor(*ac)
-                    p.font.bold = True
-                    bd = ss.get('body','')
-                    if bd:
-                        tb2 = slide.shapes.add_textbox(Inches(1),Inches(2.5),Inches(11),Inches(4))
-                        p2 = tb2.text_frame.paragraphs[0]
-                        p2.text = _format_text(bd)
-                        p2.font.size = Pt(18)
-                        p2.font.color.rgb = RGBColor(200,200,200)
+            add_accent_bar(slide, 0, 3.0, 13.333, 0.06, colors["accent"])
+            add_text_box(slide, 1.5, 1.5, 10, 1.5, _format_text(title), font_size=44, bold=True, color=colors["text"])
+            add_text_box(slide, 1.5, 3.3, 10, 0.8, "Generated %s" % datetime.datetime.now().strftime("%B %d, %Y"), font_size=18, color=colors["subtitle"])
 
-                elif layout == 'table':
-                    rows = ss.get('rows', [])
-                    headers = ss.get('headers', [])
-                    if headers and rows:
-                        n_cols = len(headers)
-                        n_rows = len(rows) + 1
-                        tbl_x, tbl_y = Inches(1), Inches(1.5)
-                        tbl_w, tbl_h = Inches(12), Inches(0.5 * n_rows)
-                        table_shape = slide.shapes.add_table(n_rows, n_cols, tbl_x, tbl_y, tbl_w, tbl_h)
-                        table = table_shape.table
-                        for ci, h in enumerate(headers):
-                            cell = table.cell(0, ci)
-                            cell.text = _format_text(str(h))
-                            for paragraph in cell.text_frame.paragraphs:
-                                paragraph.font.size = Pt(14)
-                                paragraph.font.bold = True
-                                paragraph.font.color.rgb = RGBColor(255, 255, 255)
-                        for ri, row in enumerate(rows):
-                            for ci in range(n_cols):
-                                cell = table.cell(ri + 1, ci)
-                                cell.text = _format_text(str(row[ci]) if ci < len(row) else '')
-                                for paragraph in cell.text_frame.paragraphs:
-                                    paragraph.font.size = Pt(12)
-                                    paragraph.font.color.rgb = RGBColor(220, 220, 220)
+            # --- Process content into slides ---
+            lines = content.split('\n')
+            current_slide_lines = []
+            slide_count = 1
 
-                elif layout == 'title_bar':
-                    tb = slide.shapes.add_textbox(Inches(1), Inches(3), Inches(11), Inches(1))
-                    p = tb.text_frame.paragraphs[0]
-                    p.text = _format_text(stitle)
-                    p.font.size = Pt(40)
-                    p.font.bold = True
-                    p.font.color.rgb = RGBColor(255, 255, 255)
-                    p.alignment = PP_ALIGN.CENTER
-                    sub = slide.shapes.add_textbox(Inches(1), Inches(4.5), Inches(11), Inches(1))
-                    ps = sub.text_frame.paragraphs[0]
-                    ps.text = _format_text(ss.get('subtitle', t))
-                    ps.font.size = Pt(18)
-                    ps.font.color.rgb = RGBColor(200, 200, 200)
-                    ps.alignment = PP_ALIGN.CENTER            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+
+                if line.startswith('# ') or line.startswith('## '):
+                    if current_slide_lines:
+                        _render_content_slide(prs, current_slide_lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_count)
+                        slide_count += 1
+                    current_slide_lines = [line]
+                else:
+                    current_slide_lines.append(line)
+
+            if current_slide_lines:
+                _render_content_slide(prs, current_slide_lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_count)
+
             out = io.BytesIO()
             prs.save(out)
             out.seek(0)
-            fname = output_filename or "presentation.pptx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, fname = await self._save_and_link(out.getvalue(), "%s.pptx" % title, __request__)
             if url:
-                return f"[{name}]({url})\n\nPresentation with {len(slides_data)} slides."
+                return "Presentation created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
-
-    async def generate_spreadsheet(self, content: str, template: str = "", accent: str = "", output_filename: str = "", __user__=None, __request__=None) -> str:
-        """Generate a professional Excel workbook from a JSON specification.
-
-        Accepts a JSON spec with title, sheets array. Each sheet has a kind:
-        table, inputs, kpi_row, chart, notes. Supports Excel tables with
-        auto-filter, row stripes, freeze panes, column formatting (text,
-        number, currency, percent, date, integer), live formulas, conditional
-        formatting, data validation, and multi-sheet workbooks.
+    async def generate_spreadsheet(self, content: str, title: str = "Spreadsheet", theme: str = "professional", __user__=None, __request__=None) -> str:
+        """Generate a professional Excel spreadsheet with modern styling.
 
         Args:
-            content: JSON specification string defining the workbook structure
-            template: Template style ('financial', 'minimal', or empty for default)
-            accent: Hex color accent (e.g. '#1B6B93'), defaults to self.valves.default_accent
-            output_filename: Custom output filename (defaults to title-based .xlsx)
+            content: CSV or tab-delimited data (first row = headers, rest = data)
+            title: Spreadsheet title / filename
+            theme: Visual theme - professional, modern, corporate, minimal, colorful, pastel
         Returns:
-            Markdown link to the generated file, or error JSON
+            Markdown link to the generated file
         """
         try:
             import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
             from openpyxl.utils import get_column_letter
             from openpyxl.worksheet.table import Table, TableStyleInfo
-            from openpyxl.formatting.rule import DataBarRule, ColorScaleRule, CellIsRule
-            from openpyxl.worksheet.datavalidation import DataValidation
+            import io
 
-            acc = accent or getattr(self.valves, 'default_accent', '#1B6B93')
-            r, g, b = int(acc[1:3], 16), int(acc[3:5], 16), int(acc[5:7], 16)
-            acc_hex = acc.lstrip('#')
+            # --- Color Themes ---
+            themes = {
+                "professional": {"header": "1F4E79", "header_font": "FFFFFF", "alt_row": "F0F5FA", "border": "CCCCCC", "accent": "2E75B6"},
+                "modern": {"header": "2D3436", "header_font": "FFFFFF", "alt_row": "F5F5F5", "border": "DFE6E9", "accent": "6C5CE7"},
+                "corporate": {"header": "003366", "header_font": "FFFFFF", "alt_row": "E8EEF4", "border": "B0C4DE", "accent": "CC0000"},
+                "minimal": {"header": "333333", "header_font": "FFFFFF", "alt_row": "F8F8F8", "border": "DDDDDD", "accent": "666666"},
+                "colorful": {"header": "E17055", "header_font": "FFFFFF", "alt_row": "FFF3E0", "border": "FABEAB", "accent": "FDCB6E"},
+                "pastel": {"header": "6C5CE7", "header_font": "FFFFFF", "alt_row": "F3E5F5", "border": "CE93D8", "accent": "A29BFE"},
+            }
+            colors = themes.get(theme, themes["professional"])
 
-            spec = json.loads(content)
-            title = spec.get('title', 'Workbook')
-            sheets_spec = spec.get('sheets', [])
+            header_fill = PatternFill(start_color=colors["header"], end_color=colors["header"], fill_type="solid")
+            header_font = Font(name='Calibri', size=11, bold=True, color=colors["header_font"])
+            alt_fill = PatternFill(start_color=colors["alt_row"], end_color=colors["alt_row"], fill_type="solid")
+            body_font = Font(name='Calibri', size=11)
+            thin_border = Border(
+                left=Side(style='thin', color=colors["border"]),
+                right=Side(style='thin', color=colors["border"]),
+                top=Side(style='thin', color=colors["border"]),
+                bottom=Side(style='thin', color=colors["border"])
+            )
 
             wb = openpyxl.Workbook()
-            wb.remove(wb.active)
+            ws = wb.active
+            ws.title = title[:31]
 
-            # Color palette
-            header_fill = PatternFill(start_color=acc_hex, end_color=acc_hex, fill_type="solid")
-            header_font = Font(bold=True, color="FFFFFF", size=11)
-            alt_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
-            thin_border = Border(
-                left=Side(style='thin', color='D0D0D0'),
-                right=Side(style='thin', color='D0D0D0'),
-                top=Side(style='thin', color='D0D0D0'),
-                bottom=Side(style='thin', color='D0D0D0')
-            )
-            number_fmts = {
-                'currency': '#,##0.00',
-                'percent': '0.0%',
-                'number': '#,##0',
-                'date': 'YYYY-MM-DD',
-                'text': '@',
-                'integer': '#,##0'
-            }
+            # Parse CSV or tab-delimited content
+            lines = [l.strip() for l in content.split('\n') if l.strip()]
+            data = []
+            for line in lines:
+                sep = '\t' if '\t' in line else ','
+                cells = [c.strip().strip('"') for c in line.split(sep)]
+                data.append(cells)
 
-            # Template-specific styles
-            input_font = None
-            input_fill = None
-            if template == 'financial':
-                input_font = Font(color="1F4E79", size=11)
-                input_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+            if not data:
+                return json.dumps({"error": "No data provided"})
 
-            for sheet_spec in sheets_spec:
-                name = sheet_spec.get('name', 'Sheet')
-                kind = sheet_spec.get('kind', 'table')
+            # Write data
+            for row in data:
+                ws.append([_format_text(c) if isinstance(c, str) else c for c in row])
 
-                ws = wb.create_sheet(title=name)
+            # Style header row
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal='center')
+                cell.border = thin_border
 
-                if kind == 'table':
-                    table_spec = sheet_spec.get('table', {})
-                    columns = table_spec.get('columns', [])
-                    rows = table_spec.get('rows', [])
-
-                    # Write headers
-                    for j, col in enumerate(columns, 1):
-                        cell = ws.cell(row=1, column=j, value=_format_text(col.get('header', col.get('key', ''))))
-                        cell.font = header_font
-                        cell.fill = header_fill
-                        cell.alignment = Alignment(horizontal='center')
+            # Zebra striping for data rows
+            for i, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column), start=2):
+                if i % 2 == 0:
+                    for cell in row:
+                        cell.fill = alt_fill
                         cell.border = thin_border
+                        cell.font = body_font
+                else:
+                    for cell in row:
+                        cell.border = thin_border
+                        cell.font = body_font
 
-                    # Write data rows
-                    for i, row in enumerate(rows, 2):
-                        for j, col in enumerate(columns, 1):
-                            key = col['key']
-                            val = row.get(key, '')
-                            cell = ws.cell(row=i, column=j)
+            # Auto-fit columns
+            for col in ws.columns:
+                max_len = 0
+                col_letter = get_column_letter(col[0].column)
+                for cell in col:
+                    try:
+                        max_len = max(max_len, len(str(cell.value or '')))
+                    except:
+                        pass
+                ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
 
-                            # Handle formulas (strings starting with =)
-                            if isinstance(val, str) and val.startswith('='):
-                                cell.value = val
-                                if template == 'financial':
-                                    cell.font = Font(color="000000", size=11)
-                            else:
-                                cell.value = _format_text(val) if not (isinstance(val, str) and val.startswith('=')) else val
-                                if template == 'financial' and col.get('format') in ('currency', 'number'):
-                                    cell.font = Font(color="1F4E79", size=11)
-                                    if input_fill:
-                                        cell.fill = input_fill
+            # Freeze top row
+            ws.freeze_panes = 'A2'
 
-                            # Number format
-                            fmt = col.get('format', '')
-                            if fmt in number_fmts:
-                                cell.number_format = number_fmts[fmt]
+            # Add auto-filter
+            if ws.max_row > 1:
+                ws.auto_filter.ref = "A1:%s%d" % (get_column_letter(ws.max_column), ws.max_row)
 
-                            cell.border = thin_border
-                            cell.alignment = Alignment(horizontal='right' if fmt in ('currency', 'number', 'percent', 'integer') else 'left')
-
-                            # Zebra striping
-                            if i % 2 == 0:
-                                cell.fill = alt_fill
-
-                    # Freeze panes
-                    freeze = table_spec.get('freeze', '')
-                    if freeze:
-                        ws.freeze_panes = freeze
-
-                    # Auto-fit columns
-                    for j, col in enumerate(columns, 1):
-                        max_len = 0
-                        col_letter = get_column_letter(j)
-                        for i in range(1, min(len(rows) + 2, 100)):
-                            val = str(ws.cell(row=i, column=j).value or '')
-                            max_len = max(max_len, len(val))
-                        ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
-
-                    # Excel Table (ListObject) with auto-filter and styling
-                    if table_spec.get('excel_table', False) and rows:
-                        max_row = len(rows) + 1
-                        max_col = len(columns)
-                        ref = f"A1:{get_column_letter(max_col)}{max_row}"
-                        tab = Table(displayName=table_spec.get('name', 'Table1').replace(' ', '_'), ref=ref)
-                        style = TableStyleInfo(
-                            name="TableStyleMedium6",
-                            showFirstColumn=False,
-                            showLastColumn=False,
-                            showRowStripes=True,
-                            showColumnStripes=False
-                        )
-                        tab.tableStyleInfo = style
-                        ws.add_table(tab)
-
-                    # Auto-filter (when not using excel_table)
-                    if not table_spec.get('excel_table', False) and rows and table_spec.get('auto_filter', False):
-                        max_row = len(rows) + 1
-                        max_col = len(columns)
-                        ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
-
-                    # Conditional formatting
-                    cf = table_spec.get('conditional_formatting', {})
-                    if cf.get('type') == 'data_bar':
-                        col_range = cf.get('range', 'B2:B100')
-                        rule = DataBarRule(start_type='min', end_type='max', color=acc_hex)
-                        ws.conditional_formatting.add(col_range, rule)
-                    elif cf.get('type') == 'color_scale':
-                        col_range = cf.get('range', 'B2:B100')
-                        rule = ColorScaleRule(
-                            start_type='min', start_color='FFFFFF',
-                            end_type='max', end_color=acc_hex
-                        )
-                        ws.conditional_formatting.add(col_range, rule)
-                    elif cf.get('type') == 'cell_is':
-                        col_range = cf.get('range', 'B2:B100')
-                        rule = CellIsRule(
-                            operator=cf.get('operator', 'greaterThan'),
-                            formula=[cf.get('value', '0')],
-                            fill=PatternFill(start_color=cf.get('fill_color', 'C6EFCE'),
-                                             end_color=cf.get('fill_color', 'C6EFCE'),
-                                             fill_type='solid')
-                        )
-                        ws.conditional_formatting.add(col_range, rule)
-
-                    # Data Validation
-                    validation = table_spec.get('validation', {})
-                    if validation:
-                        dv = DataValidation(
-                            type=validation.get('type', 'list'),
-                            formula1=validation.get('formula', ''),
-                            allow_blank=True
-                        )
-                        dv.error = "Invalid value"
-                        dv.errorTitle = "Validation Error"
-                        ws.add_data_validation(dv)
-                        col_range = validation.get('range', 'A2:A1000')
-                        dv.add(col_range)
-
-                elif kind == 'kpi_row':
-                    stats = sheet_spec.get('stats', [])
-                    title_val = sheet_spec.get('title', '')
-                    if title_val:
-                        ws.cell(row=1, column=1, value=_format_text(title_val)).font = Font(bold=True, size=14, color=acc_hex)
-                    for idx, stat in enumerate(stats):
-                        col = idx * 3 + 1
-                        ws.cell(row=3, column=col, value=_format_text(stat.get('value', ''))).font = Font(bold=True, size=24, color="000000")
-                        ws.cell(row=4, column=col, value=_format_text(stat.get('label', ''))).font = Font(size=11, color="808080")
-                        change = stat.get('change', '')
-                        if change:
-                            c = ws.cell(row=5, column=col, value=_format_text(change))
-                            c.font = Font(size=12, color="27AE60" if '+' in str(change) else "E74C3C")
-                    # Auto-fit KPI columns
-                    for idx in range(len(stats)):
-                        col_letter = get_column_letter(idx * 3 + 1)
-                        ws.column_dimensions[col_letter].width = 18
-
-                elif kind == 'notes':
-                    note_spec = sheet_spec
-                    colors = {'info': '1F4E79', 'success': '27AE60', 'warning': 'E67E22', 'danger': 'E74C3C'}
-                    note_color = colors.get(note_spec.get('level', 'info'), '1F4E79')
-                    title_val = note_spec.get('title', '')
-                    if title_val:
-                        ws.cell(row=1, column=1, value=_format_text(title_val)).font = Font(bold=True, size=14, color=note_color)
-                    note_text = note_spec.get('text', '')
-                    if note_text:
-                        ws.cell(row=3, column=1, value=_format_text(note_text)).font = Font(size=11)
-                    ws.column_dimensions['A'].width = 80
-
-                elif kind == 'inputs':
-                    items = sheet_spec.get('items', [])
-                    title_val = sheet_spec.get('title', '')
-                    if title_val:
-                        ws.cell(row=1, column=1, value=_format_text(title_val)).font = Font(bold=True, size=14, color=acc_hex)
-                    for idx, item in enumerate(items):
-                        row = idx * 3 + 3
-                        label_cell = ws.cell(row=row, column=1, value=_format_text(item.get('label', '')))
-                        label_cell.font = Font(bold=True, size=11)
-                        val_cell = ws.cell(row=row, column=2, value=_format_text(item.get('value', '')))
-                        if template == 'financial' and input_fill:
-                            val_cell.fill = input_fill
-                            val_cell.font = input_font or Font(color="1F4E79", size=11)
-                        unit = item.get('unit', '')
-                        if unit:
-                            ws.cell(row=row, column=3, value=_format_text(unit)).font = Font(size=10, color="808080")
-                        comment = item.get('comment', '')
-                        if comment:
-                            ws.cell(row=row+1, column=1, value=_format_text(comment)).font = Font(size=9, color="808080", italic=True)
-                    ws.column_dimensions['A'].width = 20
-                    ws.column_dimensions['B'].width = 15
-
-                elif kind == 'chart':
-                    # Placeholder: openpyxl chart support
-                    chart_type = sheet_spec.get('chart_type', 'bar')
-                    chart_title = sheet_spec.get('chart_title', name)
-                    data_ref = sheet_spec.get('data_ref', 'A1:B10')
-                    ws.cell(row=1, column=1, value=_format_text(f"Chart: {chart_title}")).font = Font(bold=True, size=14, color=acc_hex)
-                    ws.cell(row=2, column=1, value=_format_text(f"Type: {chart_type}")).font = Font(size=11, color="808080")
-                    ws.cell(row=3, column=1, value=f"Data reference: {data_ref}").font = Font(size=11, color="808080")
-                    ws.cell(row=5, column=1, value="Note: Chart rendering requires data from a table sheet.").font = Font(size=10, color="808080", italic=True)
+            # Add Excel Table if data exists
+            if ws.max_row > 1 and ws.max_column > 0:
+                try:
+                    tab = Table(
+                        displayName="Table_" + ws.title.replace(' ', '')[:20],
+                        ref="A1:%s%d" % (get_column_letter(ws.max_column), ws.max_row)
+                    )
+                    style = TableStyleInfo(
+                        name="TableStyleMedium2",
+                        showFirstColumn=False,
+                        showLastColumn=False,
+                        showRowStripes=True,
+                        showColumnStripes=False
+                    )
+                    tab.tableStyleInfo = style
+                    ws.add_table(tab)
+                except Exception:
+                    pass
 
             out = io.BytesIO()
             wb.save(out)
             out.seek(0)
-            fname = output_filename or f"{title.replace(' ', '_')}.xlsx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, fname = await self._save_and_link(out.getvalue(), "%s.xlsx" % title, __request__)
             if url:
-                return f"[{name}]({url})\n\nProfessional workbook with {len(sheets_spec)} sheets generated."
+                return "Spreadsheet created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
-
 
     async def tracked_change(self, file_id: str, change_type: str, content: str, author: str = "Reviewer", paragraph_index: int = -1, output_filename: str = "", __user__=None, __request__=None) -> str:
         """Apply tracked changes (redlines) to a Word document with custom author name.
