@@ -8,7 +8,10 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
-| **v3.1.0** | LibreOffice ODF support (.odt, .ods, .odp) + File cleanup |
+| **v3.4.0** | AI summarize, speaker notes, document stats, QR codes, bulk ops, file search, data validation, named ranges, slide transitions, HTML export |
+| **v3.3.0** | Document comparison, Markdown export, URL import, versioning, Google Drive, OCR, i18n |
+| **v3.2.0** | ODF write (.odt/.ods/.odp), format conversion, templates, mail merge, charts, watermark, password protection, preview, metadata, accessibility |
+| **v3.1.0** | LibreOffice ODF read + File cleanup |
 | **v3.0.0** | Native file API — no file server needed, works on VPS/Docker |
 | **v2.4.0** | Cross-platform auto-detection (Windows, Mac, Linux) |
 | **v2.3.0** | Automatic text formatting (sentence case, no em dashes) |
@@ -33,6 +36,37 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 | 14 | `generate_slides` | .pptx | Generate PowerPoint presentations with 13 layouts, 5 chart types, 6 themes. |
 | 15 | `generate_spreadsheet` | .xlsx | Generate Excel workbooks with tables, formulas, conditional formatting, multi-sheet. |
 | 16 | `cleanup_files` | - | Remove generated Office files older than N days from storage and database. Default 30 days. |
+| 17 | `create_odf` | .odt .ods .odp | Create new LibreOffice/OpenOffice files from scratch. |
+| 18 | `convert_format` | All | Convert between formats (docx↔odt, xlsx↔ods, pptx↔odp). |
+| 19 | `save_template` | - | Save document templates with {placeholders} for reuse. |
+| 20 | `use_template` | .docx | Generate a document from a saved template. |
+| 21 | `list_templates` | - | List all saved templates. |
+| 22 | `schedule_cleanup` | - | Schedule automatic file cleanup at intervals. |
+| 23 | `mail_merge` | .docx | Generate personalized documents from template + CSV/Excel data. |
+| 24 | `add_chart` | .xlsx | Add bar, line, pie, or scatter charts to Excel. |
+| 25 | `add_watermark` | .docx .pdf | Add diagonal watermark (DRAFT, CONFIDENTIAL) to documents. |
+| 26 | `protect_file` | .xlsx .docx | Password-protect Excel and Word files. |
+| 27 | `preview_file` | All | Show text preview of any file before downloading. |
+| 28 | `edit_metadata` | .xlsx .docx .pptx | Edit author, title, subject, keywords in document properties. |
+| 29 | `check_accessibility` | .docx .pptx | Check for heading hierarchy, missing alt text, structure issues. |
+| 30 | `add_alt_text` | .pptx | Add alt text to images in PowerPoint slides. |
+| 31 | `compare_documents` | All | Compare two documents and show differences. |
+| 32 | `export_to_markdown` | All | Export any Office file to Markdown format. |
+| 33 | `import_from_url` | .docx | Fetch a web page and convert it to a Word document. |
+| 34 | `version_file` | All | Save a timestamped version before editing. |
+| 35 | `upload_to_drive` | All | Upload files to Google Drive (requires credentials). |
+| 36 | `ocr_extract` | .pdf | Extract text from images in PDFs using OCR. |
+| 37 | `translate_errors` | - | Set error message language (en, pt, es, fr, de). |
+| 38 | `ai_summarize` | All | Extract document text for LLM summarization. |
+| 39 | `add_speaker_notes` | .pptx | Add speaker notes to PowerPoint slides. |
+| 40 | `document_stats` | All | Word count, reading time, complexity analysis. |
+| 41 | `add_qr_code` | .docx .pptx | Generate QR codes in documents. |
+| 42 | `bulk_folder_ops` | - | List, delete, stats on all files in uploads folder. |
+| 43 | `file_search` | All | Full-text search across all generated files. |
+| 44 | `add_data_validation` | .xlsx | Dropdown lists, numeric/date validation in Excel. |
+| 45 | `add_named_range` | .xlsx | Define named ranges in Excel workbooks. |
+| 46 | `add_slide_transitions` | .pptx | Add fade, push, wipe, split transitions to slides. |
+| 47 | `export_to_html` | All | Export any Office file to a styled HTML page. |
 
 ### LibreOffice ODF Support (v3.1.0)
 
@@ -98,9 +132,9 @@ manage_revisions(file_id, action="accept_all")
 | .pptx | Yes | Yes | Yes | Full support via python-pptx |
 | .doc | No | No | No | Suggest converting to .docx |
 | .ppt | No | No | No | Suggest converting to .pptx |
-| .odt | Yes | No | No | LibreOffice Writer via odfpy |
-| .ods | Yes | No | No | LibreOffice Calc via odfpy |
-| .odp | Yes | No | No | LibreOffice Impress via odfpy |
+| .odt | Yes | No | Yes | LibreOffice Writer via odfpy |
+| .ods | Yes | No | Yes | LibreOffice Calc via odfpy |
+| .odp | Yes | No | Yes | LibreOffice Impress via odfpy |
 
 ## Installation
 
