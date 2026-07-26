@@ -540,6 +540,8 @@ class Tools:
             default=None,
             description="Override the base URL for download links. Auto-detected from X-Original-Host header or WEBUI_URL env var if unset.",
         )
+        templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
+        cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
         pass
 
     def __init__(self):
@@ -2403,3 +2405,414 @@ class Tools:
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
+
+
+    # --- v3.2.0: ODF Write ---
+    async def create_odf(self, content: str, filename: str = "document", format: str = "odt", __user__=None, __request__=None) -> str:
+        """Create a new ODF file (.odt, .ods, .odp)."""
+        from odf.opendocument import OpenDocumentText, OpenDocumentSpreadsheet, OpenDocumentPresentation
+        from odf.text import P, H
+        from odf.table import Table, TableRow, TableCell
+        import io
+        
+        try:
+            if format == "ods":
+                doc = OpenDocumentSpreadsheet()
+                lines = content.split('\n')
+                table = Table(name="Sheet1")
+                for line in lines:
+                    line = line.strip()
+                    if not line: continue
+                    cells = [c.strip() for c in line.split(',')]
+                    row = TableRow()
+                    for c in cells:
+                        cell = TableCell()
+                        cell.addElement(P(text=_format_text(c)))
+                        row.addElement(cell)
+                    table.addElement(row)
+                doc.spreadsheet.addElement(table)
+            elif format == "odp":
+                doc = OpenDocumentPresentation()
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if not line: continue
+                    if line.startswith('# '):
+                        doc.presentation.addElement(H(outlinelevel=1, text=_format_text(line[2:])))
+                    else:
+                        doc.presentation.addElement(P(text=_format_text(line)))
+            else:
+                doc = OpenDocumentText()
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if not line: continue
+                    if line.startswith('# '):
+                        doc.text.addElement(H(outlinelevel=1, text=_format_text(line[2:])))
+                    elif line.startswith('## '):
+                        doc.text.addElement(H(outlinelevel=2, text=_format_text(line[3:])))
+                    else:
+                        doc.text.addElement(P(text=_format_text(line)))
+            
+            buf = io.BytesIO()
+            doc.write(buf)
+            buf.seek(0)
+            url, fname = await self._save_and_link(buf.getvalue(), f"{filename}.{format}", __request__, __user__=__user__)
+            if url:
+                return f"ODF file created: [{fname}]({url})"
+            return json.dumps({"error": "Could not save file"})
+        except ImportError:
+            return json.dumps({"error": "odfpy not installed. Install with: pip install odfpy"})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    # --- v3.2.0: Format Conversion ---
+    async def convert_format(self, file_id: str, target_format: str, __user__=None, __request__=None) -> str:
+        """Convert between Office formats (docx<->odt, xlsx<->ods, pptx<->odp)."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        base_name = os.path.splitext(filename)[0]
+        
+        if ftype in ("xlsx", "xls"):
+            content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx":
+            content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx":
+            content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt", "ods", "odp"):
+            content = _read_odf(file_bytes, filename)
+        else:
+            return json.dumps({"error": f"Unsupported source format: {ftype}"})
+        
+        if target_format in ("odt", "ods", "odp"):
+            return await self.create_odf(content, base_name, target_format, __user__=__user__, __request__=__request__)
+        elif target_format == "docx":
+            return await self.generate_document(content, base_name, __user__=__user__, __request__=__request__)
+        elif target_format == "pptx":
+            return await self.generate_slides(content, base_name, __user__=__user__, __request__=__request__)
+        elif target_format == "xlsx":
+            return await self.generate_spreadsheet(content, base_name, __user__=__user__, __request__=__request__)
+        return json.dumps({"error": f"Unsupported target format: {target_format}"})
+
+    # --- v3.2.0: Template System ---
+    async def save_template(self, name: str, content: str) -> str:
+        """Save a document template for reuse."""
+        templates = json.loads(self.valves.templates or "{}")
+        templates[name] = content
+        self.valves.templates = json.dumps(templates)
+        return f"Template '{name}' saved."
+
+    async def use_template(self, name: str, __user__=None, __request__=None, **kwargs) -> str:
+        """Generate a document from a saved template, replacing {placeholders}."""
+        templates = json.loads(self.valves.templates or "{}")
+        if name not in templates:
+            return f"Template '{name}' not found. Available: {', '.join(templates.keys())}"
+        content = templates[name]
+        for key, value in kwargs.items():
+            content = content.replace(f"{{{key}}}", str(value))
+        return await self.generate_document(content, name, __user__=__user__, __request__=__request__)
+
+    async def list_templates(self) -> str:
+        """List all saved templates."""
+        templates = json.loads(self.valves.templates or "{}")
+        if not templates:
+            return "No templates saved."
+        result = "Available templates:\n"
+        for name in templates:
+            preview = templates[name][:50].replace('\n', ' ')
+            result += f"- {name}: {preview}...\n"
+        return result
+
+    # --- v3.2.0: Scheduled Cleanup ---
+    async def schedule_cleanup(self, days_old: int = 30, interval_hours: int = 24) -> str:
+        """Schedule automatic cleanup every N hours. Set interval_hours=0 to disable."""
+        schedule = {"days_old": days_old, "interval_hours": interval_hours, "enabled": interval_hours > 0}
+        self.valves.cleanup_schedule = json.dumps(schedule)
+        if interval_hours > 0:
+            return f"Cleanup scheduled: remove files older than {days_old} days, every {interval_hours} hours."
+        return "Scheduled cleanup disabled."
+
+    # --- v3.2.0: Mail Merge ---
+    async def mail_merge(self, template_file_id: str, data_file_id: str, output_prefix: str = "merged", __user__=None, __request__=None) -> str:
+        """Generate personalized documents by merging CSV/Excel data into a DOCX template."""
+        from docx import Document
+        import io, csv
+        
+        t_bytes, t_name, t_type = self._resolve_file(template_file_id)
+        if not t_bytes:
+            return json.dumps({"error": f"Template not found: {template_file_id}"})
+        
+        d_bytes, d_name, d_type = self._resolve_file(data_file_id)
+        if not d_bytes:
+            return json.dumps({"error": f"Data file not found: {data_file_id}"})
+        
+        rows = []
+        if d_type in ("xlsx", "xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(d_bytes))
+            ws = wb.active
+            headers = [str(c.value or '') for c in ws[1]]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                rows.append(dict(zip(headers, [str(v or '') for v in row])))
+        else:
+            reader = csv.DictReader(io.StringIO(d_bytes.decode('utf-8')))
+            rows = list(reader)
+        
+        if not rows:
+            return json.dumps({"error": "No data rows found"})
+        
+        results = []
+        for i, row in enumerate(rows):
+            doc = Document(io.BytesIO(t_bytes))
+            for para in doc.paragraphs:
+                for key, value in row.items():
+                    if f"{{{{{key}}}}}" in para.text:
+                        for run in para.runs:
+                            run.text = run.text.replace(f"{{{{{key}}}}}", value)
+            buf = io.BytesIO()
+            doc.save(buf)
+            buf.seek(0)
+            fname = f"{output_prefix}_{i+1}.docx"
+            url, saved = await self._save_and_link(buf.getvalue(), fname, __request__, __user__=__user__)
+            if url:
+                results.append(f"[{saved}]({url})")
+        
+        return f"Merged {len(results)} documents:\n" + "\n".join(results)
+
+    # --- v3.2.0: Chart Generation ---
+    async def add_chart(self, file_id: str, chart_type: str = "bar", title: str = "Chart", __user__=None, __request__=None) -> str:
+        """Add a chart to an Excel spreadsheet. chart_type: bar, line, pie, scatter."""
+        from openpyxl import load_workbook
+        from openpyxl.chart import BarChart, LineChart, PieChart, ScatterChart, Reference
+        from openpyxl.utils import get_column_letter
+        import io
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        wb = load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        
+        chart_types = {"bar": BarChart, "line": LineChart, "pie": PieChart, "scatter": ScatterChart}
+        chart_class = chart_types.get(chart_type, BarChart)
+        chart = chart_class()
+        chart.title = _format_text(title)
+        chart.style = 10
+        
+        if ws.max_row > 1:
+            data = Reference(ws, min_col=1, min_row=1, max_row=ws.max_row, max_col=ws.max_column)
+            chart.add_data(data, titles_from_data=True)
+        
+        chart_col = get_column_letter(ws.max_column + 2)
+        ws.add_chart(chart, f"{chart_col}1")
+        
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url:
+            return f"Chart added: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.2.0: Watermark ---
+    async def add_watermark(self, file_id: str, text: str = "DRAFT", __user__=None, __request__=None) -> str:
+        """Add a diagonal watermark to a DOCX or PDF file."""
+        import io
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        if ftype == "docx":
+            from docx import Document
+            from docx.shared import Pt, RGBColor
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            
+            doc = Document(io.BytesIO(file_bytes))
+            for section in doc.sections:
+                header = section.header
+                header.is_linked_to_previous = False
+                p = header.paragraphs[0]
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = p.add_run()
+                run.text = _format_text(text)
+                run.font.size = Pt(72)
+                run.font.color.rgb = RGBColor(128, 128, 128)
+            buf = io.BytesIO()
+            doc.save(buf)
+            buf.seek(0)
+        elif ftype == "pdf":
+            try:
+                import fitz
+                pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+                for page in pdf_doc:
+                    rect = page.rect
+                    page.insert_text((rect.width/2-100, rect.height/2), _format_text(text), fontsize=72, color=(0.5,0.5,0.5), alpha=0.1, rotate=45)
+                buf = io.BytesIO()
+                pdf_doc.save(buf)
+                pdf_doc.close()
+                buf.seek(0)
+            except ImportError:
+                return json.dumps({"error": "PyMuPDF not installed. Install with: pip install PyMuPDF"})
+        else:
+            return json.dumps({"error": f"Watermark not supported for {ftype}. Use DOCX or PDF."})
+        
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url:
+            return f"Watermark added: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.2.0: File Preview ---
+    async def preview_file(self, file_id: str, max_lines: int = 20) -> str:
+        """Show a text preview of any Office file before downloading."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        if ftype in ("xlsx", "xls"):
+            content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx":
+            content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx":
+            content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt", "ods", "odp"):
+            content = _read_odf(file_bytes, filename)
+        else:
+            return json.dumps({"error": f"Preview not supported for {ftype}"})
+        
+        lines = content.split('\n')
+        preview = '\n'.join(lines[:max_lines])
+        total = len(lines)
+        result = f"**{filename}** ({ftype.upper()}, {total} lines)\n\n```\n{preview}\n```"
+        if total > max_lines:
+            result += f"\n... ({total - max_lines} more lines)"
+        return result
+
+    # --- v3.2.0: Metadata Editing ---
+    async def edit_metadata(self, file_id: str, author: str = "", title: str = "", subject: str = "", keywords: str = "", __user__=None, __request__=None) -> str:
+        """Edit document metadata (author, title, subject, keywords)."""
+        import io
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        changes = []
+        if ftype == "docx":
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            cp = doc.core_properties
+            if author: cp.author = _format_text(author); changes.append("author")
+            if title: cp.title = _format_text(title); changes.append("title")
+            if subject: cp.subject = _format_text(subject); changes.append("subject")
+            if keywords: cp.keywords = _format_text(keywords); changes.append("keywords")
+            buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        elif ftype == "xlsx":
+            from openpyxl import load_workbook
+            wb = load_workbook(io.BytesIO(file_bytes))
+            if author: wb.properties.creator = _format_text(author); changes.append("author")
+            if title: wb.properties.title = _format_text(title); changes.append("title")
+            if subject: wb.properties.subject = _format_text(subject); changes.append("subject")
+            buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        elif ftype == "pptx":
+            from pptx import Presentation
+            prs = Presentation(io.BytesIO(file_bytes))
+            cp = prs.core_properties
+            if author: cp.author = _format_text(author); changes.append("author")
+            if title: cp.title = _format_text(title); changes.append("title")
+            if subject: cp.subject = _format_text(subject); changes.append("subject")
+            if keywords: cp.keywords = _format_text(keywords); changes.append("keywords")
+            buf = io.BytesIO(); prs.save(buf); buf.seek(0)
+        else:
+            return json.dumps({"error": f"Metadata editing not supported for {ftype}"})
+        
+        if not changes:
+            return json.dumps({"error": "No metadata fields specified"})
+        
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url:
+            return f"Metadata updated ({', '.join(changes)}): [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.2.0: Accessibility Check ---
+    async def check_accessibility(self, file_id: str) -> str:
+        """Check a document for accessibility issues."""
+        import io
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        issues = []
+        if ftype == "docx":
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            headings = []
+            for p in doc.paragraphs:
+                if p.style.name.startswith('Heading'):
+                    level = int(p.style.name.split()[-1]) if p.style.name.split()[-1].isdigit() else 1
+                    headings.append((level, p.text[:50]))
+            prev = 0
+            for level, text in headings:
+                if level > prev + 1:
+                    issues.append(f"Heading skip: H{prev} to H{level} ('{text}')")
+                prev = level
+            if not headings:
+                issues.append("No headings found - document may lack structure")
+        elif ftype == "pptx":
+            from pptx import Presentation
+            prs = Presentation(io.BytesIO(file_bytes))
+            for i, slide in enumerate(prs.slides):
+                for shape in slide.shapes:
+                    if shape.shape_type == 13 and not shape.alt_text:
+                        issues.append(f"Slide {i+1}: Image missing alt text")
+        
+        if not issues:
+            return f"Accessibility check passed for {filename}. No issues found."
+        result = f"**Accessibility Report: {filename}**\n\n"
+        for issue in issues:
+            result += f"- {issue}\n"
+        result += f"\n{len(issues)} issue(s) found."
+        return result
+
+    # --- v3.2.0: Add Alt Text ---
+    async def add_alt_text(self, file_id: str, slide_num: int = 1, shape_index: int = 0, alt_text: str = "", __user__=None, __request__=None) -> str:
+        """Add alt text to an image in a PowerPoint slide."""
+        import io
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        if ftype != "pptx":
+            return json.dumps({"error": "Alt text only supported for PPTX files"})
+        
+        from pptx import Presentation
+        prs = Presentation(io.BytesIO(file_bytes))
+        if slide_num > len(prs.slides):
+            return json.dumps({"error": f"Slide {slide_num} not found. Has {len(prs.slides)} slides."})
+        
+        slide = prs.slides[slide_num - 1]
+        pic_count = 0
+        for shape in slide.shapes:
+            if shape.shape_type == 13:
+                if pic_count == shape_index:
+                    shape.alt_text = _format_text(alt_text)
+                    buf = io.BytesIO()
+                    prs.save(buf)
+                    buf.seek(0)
+                    url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+                    if url:
+                        return f"Alt text added: [{fname}]({url})"
+                    return json.dumps({"error": "Could not save file"})
+                pic_count += 1
+        return json.dumps({"error": f"Image {shape_index} not found. Found {pic_count} images."})
+
+    # --- v3.2.0: Progress Indicators ---
+    async def _progress(self, current: int, total: int, operation: str = "Processing") -> None:
+        """Emit progress via __event_emitter__ if available."""
+        try:
+            await __event_emitter__({"type": "status", "data": {"description": f"{operation}: {current}/{total}", "done": current >= total}})
+        except Exception:
+            pass
