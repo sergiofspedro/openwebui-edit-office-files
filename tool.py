@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.1.1
+version: 3.0.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -163,6 +163,8 @@ def _detect_type(filename: str) -> str:
         return "ods"
     if ext in (".odp",):
         return "odp"
+    if ext in (".csv",):
+        return "csv"
     return "unknown"
 
 
@@ -546,7 +548,7 @@ class Tools:
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
-    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None, __user__=None) -> tuple:
+    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None) -> tuple:
         """Save file to Open WebUI uploads dir, register in DB, return download URL."""
         import base64 as _b64
         import hashlib
@@ -576,8 +578,6 @@ class Tools:
             file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
             now = int(_time.time())
 
-            user_id = __user__.get("id", "") if __user__ else ""
-
             conn = sqlite3.connect(_DB_PATH)
             conn.execute(
                 """INSERT OR REPLACE INTO file
@@ -585,7 +585,7 @@ class Tools:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     file_id,
-                    user_id,
+                    "",
                     file_hash,
                     _encode_filename(filename),
                     os.path.join(_UPLOAD_DIR, file_id),
@@ -634,20 +634,26 @@ class Tools:
         self,
         file_id: str,
         max_rows: int = 500,
+        sheet_name: str = "",
+        row_start: int = 1,
+        row_end: int = 0,
         __user__=None,
         __request__=None,
     ) -> str:
-        """Read any Office file (.xlsx, .xls, .docx, .pptx) and return its contents as structured JSON.
+        """Read any Office file (.xlsx, .xls, .csv, .docx, .pptx) and return its contents as structured JSON.
 
         Auto-detects the file type from the file ID or filename.
-        For xlsx/xls: returns sheets with headers and rows.
+        For xlsx/xls/csv: returns sheets with headers and rows.
         For docx: returns paragraphs with styles and tables.
         For pptx: returns slides with shapes and text.
         Legacy .doc and .ppt formats return a helpful error message.
 
         Args:
             file_id: The Open WebUI file ID (UUID) or filename
-            max_rows: Maximum rows to return for xlsx (default 500)
+            max_rows: Maximum rows to return (default 500)
+            sheet_name: Optional - read only this sheet (xlsx/xls only)
+            row_start: Starting row (1-indexed, default 1)
+            row_end: Ending row (0 = use max_rows limit)
         """
         try:
             file_data = _read_file_bytes(file_id)
@@ -681,7 +687,10 @@ class Tools:
                 import openpyxl
                 wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
                 result["sheets"] = []
-                for sn in wb.sheetnames:
+                sheetnames = [sn for sn in wb.sheetnames] if not sheet_name else [sn for sn in wb.sheetnames if sn == sheet_name]
+                if sheet_name and sheet_name not in wb.sheetnames:
+                    result["warning"] = f"Sheet '{sheet_name}' not found. Available sheets: {wb.sheetnames}"
+                for sn in sheetnames:
                     ws = wb[sn]
                     sheet: Dict[str, Any] = {
                         "name": sn,
@@ -690,8 +699,10 @@ class Tools:
                         "total_rows": ws.max_row or 0,
                         "total_cols": ws.max_column or 0,
                     }
-                    max_r = min(ws.max_row or 0, max_rows)
-                    for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=max_r), 1):
+                    r_start = max(1, row_start)
+                    r_end = row_end if row_end > 0 else (ws.max_row or 0)
+                    r_end = min(r_end, r_start + max_rows - 1) if max_rows else r_end
+                    for ri, row in enumerate(ws.iter_rows(min_row=r_start, max_row=r_end), r_start):
                         rd = [_cell_value(c) for c in row]
                         if ri == 1:
                             sheet["headers"] = [str(v) if v is not None else "" for v in rd]
@@ -704,7 +715,13 @@ class Tools:
                 import xlrd
                 xls_book = xlrd.open_workbook(file_contents=file_data)
                 result["sheets"] = []
-                for sheet_idx in range(xls_book.nsheets):
+                sheet_indices = range(xls_book.nsheets)
+                if sheet_name:
+                    sheet_indices = [i for i in range(xls_book.nsheets) if xls_book.sheet_by_index(i).name == sheet_name]
+                    if not sheet_indices:
+                        all_names = [xls_book.sheet_by_index(i).name for i in range(xls_book.nsheets)]
+                        result["warning"] = f"Sheet '{sheet_name}' not found. Available sheets: {all_names}"
+                for sheet_idx in sheet_indices:
                     xls_sheet = xls_book.sheet_by_index(sheet_idx)
                     sheet: Dict[str, Any] = {
                         "name": xls_sheet.name,
@@ -713,8 +730,11 @@ class Tools:
                         "total_rows": xls_sheet.nrows,
                         "total_cols": xls_sheet.ncols,
                     }
-                    max_r = min(xls_sheet.nrows, max_rows)
-                    for rx in range(max_r):
+                    r_start = max(0, row_start - 1)
+                    r_end = row_end if row_end > 0 else xls_sheet.nrows
+                    r_end = min(r_end, r_start + max_rows) if max_rows else r_end
+                    r_end = min(r_end, xls_sheet.nrows)
+                    for rx in range(r_start, r_end):
                         row_values = []
                         for cx in range(xls_sheet.ncols):
                             cell = xls_sheet.cell(rx, cx)
@@ -734,6 +754,31 @@ class Tools:
                             sheet["rows"].append(row_values)
                     result["sheets"].append(sheet)
                 xls_book.release_resources()
+
+            elif file_type == "csv":
+                import csv as _csv_mod
+                result["sheets"] = []
+                d_bytes = file_data
+                try:
+                    text = d_bytes.decode("utf-8-sig")
+                except Exception:
+                    text = d_bytes.decode("utf-8", errors="replace")
+                reader = _csv_mod.DictReader(io.StringIO(text))
+                headers = reader.fieldnames or []
+                rows = []
+                for ri, row in enumerate(reader):
+                    if max_rows and ri >= max_rows:
+                        break
+                    rows.append(dict(row))
+                base_name = os.path.splitext(os.path.basename(filename))[0] if filename else "CSV"
+                sheet = {
+                    "name": base_name,
+                    "headers": [str(h) for h in headers],
+                    "rows": [[r.get(h, "") for h in headers] for r in rows],
+                    "total_rows": len(rows),
+                    "total_cols": len(headers),
+                }
+                result["sheets"].append(sheet)
 
             elif file_type == "docx":
                 from docx import Document
@@ -1041,7 +1086,7 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nAdded content to {file_type.upper()} file, preserving original formatting."
             return json.dumps({"error": "Could not save file"})
@@ -1207,11 +1252,261 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nReplaced '{find_text}' with '{replace_with}' in {count} place(s), preserving all formatting."
             return json.dumps({"error": "Could not save file"})
 
+        except Exception as e:
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
+
+    # -----------------------------------------------------------------
+    # UPDATE CELLS
+    # -----------------------------------------------------------------
+    async def update_cells(
+        self,
+        file_id: str,
+        cells: str,
+        output_filename: str = "",
+        __user__=None,
+        __request__=None,
+    ) -> str:
+        """Update individual cells in an XLSX file. Pass a JSON array of cell updates.
+
+        Each update: {"cell": "A1", "value": "new value"} or {"cell": "B2", "value": 42, "sheet": "Sheet1"}
+        If sheet is omitted, uses the active sheet.
+
+        Args:
+            file_id: The file ID of the XLSX file to edit
+            cells: JSON string - array of {cell, value[, sheet]} objects
+            output_filename: Optional output filename
+        """
+        try:
+            file_data = _read_file_bytes(file_id)
+            if file_data is None:
+                return json.dumps({"error": f"Could not read file {file_id}"})
+
+            try:
+                conn2 = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+                row2 = conn2.execute(
+                    "SELECT filename FROM file WHERE id = ?", (file_id,)
+                ).fetchone()
+                conn2.close()
+                filename = row2[0] if row2 else file_id
+            except Exception:
+                filename = file_id
+
+            file_type = _detect_type(filename)
+            if file_type not in ("xlsx", "xls"):
+                return json.dumps({"error": f"Unsupported type: {file_type}. Only xlsx/xls supported."})
+
+            import openpyxl
+            from openpyxl.utils import column_index_from_string
+            import re as _re_cell
+
+            try:
+                updates = json.loads(cells)
+                if not isinstance(updates, list):
+                    updates = [updates]
+            except json.JSONDecodeError:
+                return json.dumps({"error": "cells must be valid JSON (array of {cell, value} objects)"})
+
+            out_name = output_filename or os.path.splitext(filename)[0] + "_updated.xlsx"
+            wb = openpyxl.load_workbook(io.BytesIO(file_data))
+            count = 0
+            for upd in updates:
+                cell_ref = upd.get("cell", "")
+                value = upd.get("value", "")
+                sname = upd.get("sheet", "")
+                ws = wb[sname] if sname else wb.active
+                m = _re_cell.match(r"([A-Za-z]+)(\d+)", cell_ref)
+                if not m:
+                    continue
+                col_str, row_str = m.group(1), m.group(2)
+                col_idx = column_index_from_string(col_str.upper())
+                row_idx = int(row_str)
+                ws.cell(row=row_idx, column=col_idx).value = value
+                count += 1
+
+            out = io.BytesIO()
+            wb.save(out)
+            wb.close()
+            out.seek(0)
+
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            if url:
+                return f"[{name}]({url})\n\nUpdated {count} cell(s) in {file_type.upper()} file."
+            return json.dumps({"error": "Could not save file"})
+        except Exception as e:
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
+
+    # -----------------------------------------------------------------
+    # MODIFY ROWS (insert/delete)
+    # -----------------------------------------------------------------
+    async def modify_rows(
+        self,
+        file_id: str,
+        action: str,
+        row_number: int = 1,
+        count: int = 1,
+        sheet_name: str = "",
+        output_filename: str = "",
+        __user__=None,
+        __request__=None,
+    ) -> str:
+        """Insert or delete rows in an XLSX file.
+
+        Args:
+            file_id: The file ID of the XLSX file to edit
+            action: 'insert' or 'delete'
+            row_number: Row number to start at (1-indexed)
+            count: Number of rows to insert/delete (default 1)
+            sheet_name: Optional sheet name (default: active sheet)
+            output_filename: Optional output filename
+        """
+        try:
+            file_data = _read_file_bytes(file_id)
+            if file_data is None:
+                return json.dumps({"error": f"Could not read file {file_id}"})
+
+            try:
+                conn2 = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+                row2 = conn2.execute(
+                    "SELECT filename FROM file WHERE id = ?", (file_id,)
+                ).fetchone()
+                conn2.close()
+                filename = row2[0] if row2 else file_id
+            except Exception:
+                filename = file_id
+
+            file_type = _detect_type(filename)
+            if file_type not in ("xlsx", "xls"):
+                return json.dumps({"error": f"Unsupported type: {file_type}. Only xlsx/xls supported."})
+
+            import openpyxl
+
+            wb = openpyxl.load_workbook(io.BytesIO(file_data))
+            ws = wb[sheet_name] if sheet_name else wb.active
+            out_name = output_filename or os.path.splitext(filename)[0] + "_modified.xlsx"
+
+            action_lower = action.strip().lower()
+            if action_lower == "insert":
+                ws.insert_rows(idx=row_number, amount=count)
+                msg = f"Inserted {count} row(s) at row {row_number}"
+            elif action_lower == "delete":
+                ws.delete_rows(idx=row_number, amount=count)
+                msg = f"Deleted {count} row(s) starting at row {row_number}"
+            else:
+                return json.dumps({"error": f"Unknown action '{action}'. Use 'insert' or 'delete'."})
+
+            out = io.BytesIO()
+            wb.save(out)
+            wb.close()
+            out.seek(0)
+
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            if url:
+                return f"[{name}]({url})\n\n{msg} in {file_type.upper()} file."
+            return json.dumps({"error": "Could not save file"})
+        except Exception as e:
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
+
+    # -----------------------------------------------------------------
+    # PASSWORD PROTECT FILE
+    # -----------------------------------------------------------------
+    async def protect_file(
+        self,
+        file_id: str,
+        password: str,
+        output_filename: str = "",
+        __user__=None,
+        __request__=None,
+    ) -> str:
+        """Add password protection to an XLSX or DOCX file.
+
+        For XLSX: uses openpyxl workbook protection. For DOCX: uses write protection.
+        Install msoffcrypto-tool (pip install msoffcrypto-tool) for encryption support.
+
+        Args:
+            file_id: The file ID of the Office file to protect
+            password: Password to set
+            output_filename: Optional output filename
+        """
+        try:
+            file_data = _read_file_bytes(file_id)
+            if file_data is None:
+                return json.dumps({"error": f"Could not read file {file_id}"})
+
+            try:
+                conn2 = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+                row2 = conn2.execute(
+                    "SELECT filename FROM file WHERE id = ?", (file_id,)
+                ).fetchone()
+                conn2.close()
+                filename = row2[0] if row2 else file_id
+            except Exception:
+                filename = file_id
+
+            file_type = _detect_type(filename)
+            if file_type not in ("xlsx", "docx"):
+                return json.dumps({"error": f"Unsupported type: {file_type}. Only xlsx and docx supported."})
+
+            import hashlib
+
+            if file_type == "xlsx":
+                import openpyxl
+                from openpyxl.workbook.protection import WorkbookProtection
+
+                wb = openpyxl.load_workbook(io.BytesIO(file_data))
+                out_name = output_filename or os.path.splitext(filename)[0] + "_protected.xlsx"
+
+                # Set workbook protection
+                wb.security = WorkbookProtection(workbookPassword=password, lockStructure=True)
+
+                # Protect all sheets
+                for ws in wb.worksheets:
+                    ws.protection.set_password(password)
+
+                out = io.BytesIO()
+                wb.save(out)
+                wb.close()
+                out.seek(0)
+                protected_bytes = out.read()
+
+            elif file_type == "docx":
+                from docx import Document
+                from docx.oxml.ns import qn
+                from lxml import etree
+
+                out_name = output_filename or os.path.splitext(filename)[0] + "_protected.docx"
+                doc = Document(io.BytesIO(file_data))
+
+                # Add write protection XML
+                settings_element = doc.settings.element
+                protection = etree.SubElement(
+                    settings_element,
+                    qn("w:documentProtection")
+                )
+                protection.set(qn("w:edit"), "readOnly")
+                protection.set(qn("w:enforcement"), "1")
+                pw_hash = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+                protection.set(qn("w:cryptProviderType"), "rsaAES")
+                protection.set(qn("w:cryptAlgorithmClass"), "hash")
+                protection.set(qn("w:cryptAlgorithmType"), "typeAny")
+                protection.set(qn("w:cryptAlgorithmSid"), "4")
+                protection.set(qn("w:cryptSpinCount"), "100000")
+                protection.set(qn("w:hash"), pw_hash)
+                protection.set(qn("w:salt"), "AAAAAAAAAAAAAAAAAAAAAA==")
+
+                out = io.BytesIO()
+                doc.save(out)
+                out.seek(0)
+                protected_bytes = out.read()
+
+            url, fname = await self._save_and_link(protected_bytes, out_name, __request__)
+            if url:
+                return f"[{fname}]({url})\n\nPassword-protected {file_type.upper()} file created."
+            return json.dumps({"error": "Could not save file"})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -1340,7 +1635,7 @@ class Tools:
                 prs.save(out)
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nCreated new {ftype.upper()} file."
             return json.dumps({"error": "Could not save file"})
@@ -1516,7 +1811,7 @@ class Tools:
             out = io.BytesIO()
             doc.save(out)
             out.seek(0)
-            url, fname = await self._save_and_link(out.getvalue(), "%s.docx" % title, __request__, __user__=__user__)
+            url, fname = await self._save_and_link(out.getvalue(), "%s.docx" % title, __request__)
             if url:
                 return "Document created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
@@ -1617,7 +1912,7 @@ class Tools:
             out = io.BytesIO()
             prs.save(out)
             out.seek(0)
-            url, fname = await self._save_and_link(out.getvalue(), "%s.pptx" % title, __request__, __user__=__user__)
+            url, fname = await self._save_and_link(out.getvalue(), "%s.pptx" % title, __request__)
             if url:
                 return "Presentation created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
@@ -1741,12 +2036,7 @@ class Tools:
             out = io.BytesIO()
             wb.save(out)
             out.seek(0)
-<<<<<<< HEAD
             url, fname = await self._save_and_link(out.getvalue(), "%s.xlsx" % title, __request__)
-=======
-            fname = output_filename or f"{title.replace(' ', '_')}.xlsx"
-            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
->>>>>>> pr-6
             if url:
                 return "Spreadsheet created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
@@ -1814,7 +2104,7 @@ class Tools:
             out = io.BytesIO()
             doc.save(out)
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\nTracked changes by '{author}':\n" + "\n".join(results)
             return json.dumps({"error": "Could not save file"})
@@ -1869,7 +2159,7 @@ class Tools:
             wb_out.save(out)
             out.seek(0)
             fname = output_filename or "merged_workbook.xlsx"
-            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
+            url, name = await self._save_and_link(out.read(), fname, __request__)
             if url:
                 return f"[{name}]({url})\n\nMerged {merged} sheets from {len(ids)} files."
             return json.dumps({"error": "Could not save file"})
@@ -1944,7 +2234,7 @@ class Tools:
             merger.close()
             out.seek(0)
             fname = output_filename or "merged.pdf"
-            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
+            url, name = await self._save_and_link(out.read(), fname, __request__)
             if url:
                 return f"[{name}]({url})\n\nMerged {count} PDFs into one file."
             return json.dumps({"error": "Could not save file"})
@@ -1981,7 +2271,7 @@ class Tools:
                 sub.close()
                 out.seek(0)
                 part_name = f"part_{start+1}_{end}.pdf"
-                url, name = await self._save_and_link(out.read(), part_name, __request__, __user__=__user__)
+                url, name = await self._save_and_link(out.read(), part_name, __request__)
                 if url:
                     urls.append(f"[{name}]({url})")
             src.close()
@@ -2106,7 +2396,7 @@ class Tools:
             out = io.BytesIO()
             rdoc.save(out)
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
                 return f"[{name}]({url})\n\n{msg}."
             return json.dumps({"error": "Could not save file"})
