@@ -542,6 +542,7 @@ class Tools:
         )
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
+        language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
         pass
 
     def __init__(self):
@@ -2789,3 +2790,490 @@ class Tools:
             return json.dumps({"error": "Alt text only supported for PPTX files"})
         
         from pptx import Presentation
+        prs = Presentation(io.BytesIO(file_bytes))
+        if slide_num > len(prs.slides):
+            return json.dumps({"error": f"Slide {slide_num} not found. Has {len(prs.slides)} slides."})
+        
+        slide = prs.slides[slide_num - 1]
+        pic_count = 0
+        for shape in slide.shapes:
+            if shape.shape_type == 13:
+                if pic_count == shape_index:
+                    shape.alt_text = _format_text(alt_text)
+                    buf = io.BytesIO()
+                    prs.save(buf)
+                    buf.seek(0)
+                    url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+                    if url:
+                        return f"Alt text added: [{fname}]({url})"
+                    return json.dumps({"error": "Could not save file"})
+                pic_count += 1
+        return json.dumps({"error": f"Image {shape_index} not found. Found {pic_count} images."})
+
+    # --- v3.2.0: Progress Indicators ---
+    async def _progress(self, current: int, total: int, operation: str = "Processing") -> None:
+        """Emit progress via __event_emitter__ if available."""
+        try:
+            await __event_emitter__({"type": "status", "data": {"description": f"{operation}: {current}/{total}", "done": current >= total}})
+        except Exception:
+            pass
+
+
+    # --- v3.3.0: Document Comparison ---
+    async def compare_documents(self, file_id_a: str, file_id_b: str) -> str:
+        """Compare two documents and show differences."""
+        a_bytes, a_name, a_type = self._resolve_file(file_id_a)
+        b_bytes, b_name, b_type = self._resolve_file(file_id_b)
+        if not a_bytes or not b_bytes:
+            return json.dumps({"error": "One or both files not found"})
+        
+        def get_text(ftype, fb, fn):
+            if ftype in ("xlsx","xls"):
+                return self._read_xlsx(fb, fn) if ftype == "xlsx" else self._read_xls(fb, fn)
+            elif ftype == "docx": return self._read_docx(fb, fn)
+            elif ftype == "pptx": return self._read_pptx(fb, fn)
+            elif ftype in ("odt","ods","odp"): return _read_odf(fb, fn)
+            return ""
+        
+        text_a = get_text(a_type, a_bytes, a_name)
+        text_b = get_text(b_type, b_bytes, b_name)
+        
+        lines_a = text_a.split('\n')
+        lines_b = text_b.split('\n')
+        
+        result = f"**Comparison: {a_name} vs {b_name}**\n\n"
+        added = 0; removed = 0; changed = 0
+        max_len = max(len(lines_a), len(lines_b))
+        
+        for i in range(max_len):
+            la = lines_a[i] if i < len(lines_a) else None
+            lb = lines_b[i] if i < len(lines_b) else None
+            if la is None:
+                result += f"+ L{i+1}: {lb}\n"; added += 1
+            elif lb is None:
+                result += f"- L{i+1}: {la}\n"; removed += 1
+            elif la != lb:
+                result += f"~ L{i+1}:\n  - {la}\n  + {lb}\n"; changed += 1
+        
+        result += f"\n**Summary:** {added} added, {removed} removed, {changed} changed"
+        return result
+
+    # --- v3.3.0: Export to Markdown ---
+    async def export_to_markdown(self, file_id: str, __user__=None, __request__=None) -> str:
+        """Export any Office file to Markdown format."""
+        import io
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        if ftype in ("xlsx","xls"):
+            content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx":
+            content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx":
+            content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"):
+            content = _read_odf(file_bytes, filename)
+        else:
+            return json.dumps({"error": f"Export not supported for {ftype}"})
+        
+        base = os.path.splitext(filename)[0]
+        md_content = f"# {base}\n\n{content}"
+        md_bytes = md_content.encode('utf-8')
+        
+        url, fname = await self._save_and_link(md_bytes, f"{base}.md", __request__, __user__=__user__)
+        if url:
+            return f"Exported to Markdown: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.3.0: Import from URL ---
+    async def import_from_url(self, url: str, title: str = "Web Document", __user__=None, __request__=None) -> str:
+        """Fetch a web page and convert it to a Word document."""
+        try:
+            import urllib.request as _urllib
+            req = _urllib.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            resp = _urllib.urlopen(req, timeout=15)
+            html = resp.read().decode('utf-8', errors='replace')
+        except Exception as e:
+            return json.dumps({"error": f"Failed to fetch URL: {str(e)}"})
+        
+        # Simple HTML to text
+        import re as _re
+        text = _re.sub(r'<script[^>]*>.*?</script>', '', html, flags=_re.DOTALL|_re.IGNORECASE)
+        text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL|_re.IGNORECASE)
+        text = _re.sub(r'<[^>]+>', '\n', text)
+        text = _re.sub(r'\n\s*\n', '\n\n', text)
+        text = _re.sub(r'[ \t]+', ' ', text)
+        text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
+        
+        if not text:
+            return json.dumps({"error": "No text content extracted from URL"})
+        
+        return await self.generate_document(text[:50000], title, __user__=__user__, __request__=__request__)
+
+    # --- v3.3.0: File Versioning ---
+    async def version_file(self, file_id: str, label: str = "", __user__=None, __request__=None) -> str:
+        """Save a versioned copy of a file before editing."""
+        import time as _time
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        base, ext = os.path.splitext(filename)
+        ts = _time.strftime("%Y%m%d_%H%M%S")
+        label_str = f"_{label}" if label else ""
+        version_name = f"{base}_v{ts}{label_str}{ext}"
+        
+        url, fname = await self._save_and_link(file_bytes, version_name, __request__, __user__=__user__)
+        if url:
+            return f"Version saved: [{fname}]({url})"
+        return json.dumps({"error": "Could not save version"})
+
+    # --- v3.3.0: Cloud Storage (Google Drive) ---
+    async def upload_to_drive(self, file_id: str, folder_id: str = "root") -> str:
+        """Upload a file to Google Drive. Requires google-api-python-client and credentials."""
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaIoBaseUpload
+            import io as _io
+            
+            file_bytes, filename, ftype = self._resolve_file(file_id)
+            if not file_bytes:
+                return json.dumps({"error": f"File not found: {file_id}"})
+            
+            creds_path = os.environ.get("GOOGLE_CREDENTIALS", "")
+            if not creds_path or not os.path.exists(creds_path):
+                return json.dumps({"error": "GOOGLE_CREDENTIALS env var not set or file not found"})
+            
+            mime_map = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                       "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                       "pdf": "application/pdf"}
+            mime = mime_map.get(ftype, "application/octet-stream")
+            
+            creds = service_account.Credentials.from_service_account_file(creds_path, scopes=["https://www.googleapis.com/auth/drive.file"])
+            service = build("drive", "v3", credentials=creds)
+            
+            media = MediaIoBaseUpload(_io.BytesIO(file_bytes), mimetype=mime, resumable=True)
+            file_metadata = {"name": filename, "parents": [folder_id]}
+            drive_file = service.files().create(body=file_metadata, media_body=media, fields="id,webViewLink").execute()
+            
+            return f"Uploaded to Google Drive: {drive_file.get('webViewLink', drive_file.get('id'))}"
+        except ImportError:
+            return json.dumps({"error": "google-api-python-client not installed. pip install google-api-python-client google-auth"})
+        except Exception as e:
+            return json.dumps({"error": f"Drive upload failed: {str(e)}"})
+
+    # --- v3.3.0: OCR ---
+    async def ocr_extract(self, file_id: str, language: str = "eng") -> str:
+        """Extract text from images in a document using OCR. Requires pytesseract and Pillow."""
+        try:
+            import pytesseract
+            from PIL import Image
+            import io as _io
+            
+            file_bytes, filename, ftype = self._resolve_file(file_id)
+            if not file_bytes:
+                return json.dumps({"error": f"File not found: {file_id}"})
+            
+            if ftype == "pdf":
+                try:
+                    import fitz
+                    pdf = fitz.open(stream=file_bytes, filetype="pdf")
+                    results = []
+                    for i, page in enumerate(pdf):
+                        pix = page.get_pixmap(dpi=200)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        text = pytesseract.image_to_string(img, lang=language)
+                        if text.strip():
+                            results.append(f"--- Page {i+1} ---\n{text.strip()}")
+                    pdf.close()
+                    return "\n\n".join(results) if results else "No text found in PDF images"
+                except ImportError:
+                    return json.dumps({"error": "PyMuPDF not installed"})
+            else:
+                return json.dumps({"error": f"OCR only supported for PDF files. Got: {ftype}"})
+        except ImportError:
+            return json.dumps({"error": "pytesseract or Pillow not installed. pip install pytesseract Pillow"})
+        except Exception as e:
+            return json.dumps({"error": f"OCR failed: {str(e)}"})
+
+    # --- v3.3.0: i18n Error Messages ---
+    async def translate_errors(self, language: str = "en") -> str:
+        """Set the language for error messages. Supported: en, pt, es, fr, de."""
+        translations = {
+            "en": {"file_not_found": "File not found", "could_not_save": "Could not save file", "unsupported": "Unsupported format"},
+            "pt": {"file_not_found": "Ficheiro nao encontrado", "could_not_save": "Nao foi possivel guardar", "unsupported": "Formato nao suportado"},
+            "es": {"file_not_found": "Archivo no encontrado", "could_not_save": "No se pudo guardar", "unsupported": "Formato no soportado"},
+            "fr": {"file_not_found": "Fichier introuvable", "could_not_save": "Impossible d'enregistrer", "unsupported": "Format non pris en charge"},
+            "de": {"file_not_found": "Datei nicht gefunden", "could_not_save": "Konnte nicht gespeichert werden", "unsupported": "Nicht unterstutztes Format"},
+        }
+        if language not in translations:
+            return json.dumps({"error": f"Language '{language}' not supported. Available: {', '.join(translations.keys())}"})
+        self.valves.language = language
+        return f"Language set to {language}. Error messages will now appear in {language}."
+
+
+    # --- v3.4.0: AI Summarize ---
+    async def ai_summarize(self, file_id: str) -> str:
+        """Extract document text for LLM summarization. The LLM will then summarize it."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": "File not found: " + str(file_id)})
+        if ftype in ("xlsx","xls"):
+            content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format: " + str(ftype)})
+        words = len(content.split())
+        preview = content[:3000]
+        return "**" + str(filename) + "** (" + str(words) + " words)\n\n" + preview + ("\n\n... (truncated, " + str(words) + " total words)" if len(content) > 3000 else "")
+
+    # --- v3.4.0: Speaker Notes ---
+    async def add_speaker_notes(self, file_id: str, slide_num: int, notes: str, __user__=None, __request__=None) -> str:
+        """Add speaker notes to a PowerPoint slide."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype != "pptx": return json.dumps({"error": "Speaker notes only supported for PPTX"})
+        from pptx import Presentation
+        prs = Presentation(io.BytesIO(file_bytes))
+        if slide_num < 1 or slide_num > len(prs.slides):
+            return json.dumps({"error": "Slide " + str(slide_num) + " not found. Has " + str(len(prs.slides)) + " slides."})
+        slide = prs.slides[slide_num - 1]
+        notes_slide = slide.notes_slide
+        notes_slide.notes_text_frame.text = _format_text(notes)
+        buf = io.BytesIO(); prs.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url: return "Speaker notes added to slide " + str(slide_num) + ": [" + str(fname) + "](" + str(url) + ")"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.4.0: Document Stats ---
+    async def document_stats(self, file_id: str) -> str:
+        """Show document statistics: word count, reading time, complexity."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"):
+            content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        words = len(content.split())
+        chars = len(content)
+        lines = content.count('\n') + 1
+        sentences = content.count('.') + content.count('!') + content.count('?')
+        reading_time = max(1, words // 200)
+        avg_word_len = sum(len(w) for w in content.split()) / max(1, words)
+        complexity = "Easy" if avg_word_len < 4 else ("Medium" if avg_word_len < 5.5 else "Complex")
+        return "**Stats: " + str(filename) + "**\n- Words: " + str(words) + "\n- Characters: " + str(chars) + "\n- Lines: " + str(lines) + "\n- Sentences: " + str(sentences) + "\n- Reading time: ~" + str(reading_time) + " min\n- Avg word length: " + str(round(avg_word_len, 1)) + "\n- Complexity: " + str(complexity)
+
+    # --- v3.4.0: QR Codes ---
+    async def add_qr_code(self, file_id: str, data: str, __user__=None, __request__=None) -> str:
+        """Add a QR code to a DOCX or PPTX file."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        try:
+            import qrcode
+            from PIL import Image
+        except ImportError:
+            return json.dumps({"error": "qrcode or Pillow not installed. pip install qrcode Pillow"})
+        qr = qrcode.QRCode(version=1, box_size=10, border=2)
+        qr.add_data(data); qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        qr_buf = io.BytesIO(); img.save(qr_buf, format='PNG'); qr_buf.seek(0)
+        if ftype == "docx":
+            from docx import Document
+            from docx.shared import Inches
+            doc = Document(io.BytesIO(file_bytes))
+            doc.add_picture(qr_buf, width=Inches(2))
+            buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        elif ftype == "pptx":
+            from pptx import Presentation
+            from pptx.util import Inches
+            prs = Presentation(io.BytesIO(file_bytes))
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            slide.shapes.add_picture(qr_buf, Inches(4), Inches(2), Inches(2))
+            buf = io.BytesIO(); prs.save(buf); buf.seek(0)
+        else: return json.dumps({"error": "QR codes only supported for DOCX and PPTX"})
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url: return "QR code added: [" + str(fname) + "](" + str(url) + ")"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.4.0: Bulk Folder Ops ---
+    async def bulk_folder_ops(self, operation: str = "list", pattern: str = "*", __user__=None, __request__=None) -> str:
+        """Apply an operation to all files in the uploads folder. Operations: list, delete_old, stats."""
+        import glob as _glob, time as _time
+        uploads = _UPLOAD_DIR
+        if operation == "list":
+            files = sorted(_glob.glob(os.path.join(uploads, pattern)))
+            if not files: return "No files found matching: " + str(pattern)
+            result = "**Files in uploads (" + str(len(files)) + "):**\n"
+            for f in files[:50]:
+                size = os.path.getsize(f)
+                mtime = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(os.path.getmtime(f)))
+                result += "- " + os.path.basename(f) + " (" + str(round(size/1024,1)) + " KB, " + str(mtime) + ")\n"
+            if len(files) > 50: result += "... and " + str(len(files)-50) + " more"
+            return result
+        elif operation == "delete_old":
+            cutoff = _time.time() - (30 * 86400)
+            deleted = 0
+            for f in _glob.glob(os.path.join(uploads, pattern)):
+                if os.path.getmtime(f) < cutoff:
+                    os.remove(f); deleted += 1
+            return "Deleted " + str(deleted) + " files older than 30 days."
+        elif operation == "stats":
+            files = _glob.glob(os.path.join(uploads, pattern))
+            total_size = sum(os.path.getsize(f) for f in files)
+            return "**Uploads Stats:**\n- Files: " + str(len(files)) + "\n- Total size: " + str(round(total_size/1024/1024,1)) + " MB"
+        return json.dumps({"error": "Unknown operation: " + str(operation) + ". Use: list, delete_old, stats"})
+
+    # --- v3.4.0: File Search ---
+    async def file_search(self, query: str, file_type: str = "all") -> str:
+        """Search for text across all generated files. file_type: all, xlsx, docx, pptx, pdf."""
+        import glob as _glob
+        results = []
+        patterns = {"all": "*.*", "xlsx": "*.xlsx", "docx": "*.docx", "pptx": "*.pptx", "pdf": "*.pdf"}
+        pattern = patterns.get(file_type, "*.*")
+        for fpath in _glob.glob(os.path.join(_UPLOAD_DIR, pattern)):
+            try:
+                fname = os.path.basename(fpath)
+                ext = os.path.splitext(fname)[1].lower()
+                with open(fpath, 'rb') as f: fb = f.read()
+                if ext == ".xlsx":
+                    import openpyxl, io
+                    wb = openpyxl.load_workbook(io.BytesIO(fb))
+                    for ws in wb.worksheets:
+                        for row in ws.iter_rows(values_only=True):
+                            for cell in row:
+                                if cell and query.lower() in str(cell).lower():
+                                    results.append(fname + ": " + str(cell)[:100])
+                                    break
+                elif ext == ".docx":
+                    from docx import Document
+                    import io
+                    doc = Document(io.BytesIO(fb))
+                    for p in doc.paragraphs:
+                        if query.lower() in p.text.lower():
+                            results.append(fname + ": " + p.text[:100])
+                            break
+                elif ext == ".pptx":
+                    from pptx import Presentation
+                    import io
+                    prs = Presentation(io.BytesIO(fb))
+                    for slide in prs.slides:
+                        for shape in slide.shapes:
+                            if shape.has_text_frame and query.lower() in shape.text_frame.text.lower():
+                                results.append(fname + ": " + shape.text_frame.text[:100])
+                                break
+            except Exception:
+                pass
+        if not results: return "No matches found for '" + str(query) + "'"
+        return "**Search: " + str(query) + "** (" + str(len(results)) + " matches)\n" + "\n".join("- " + r for r in results[:20])
+
+    # --- v3.4.0: Data Validation ---
+    async def add_data_validation(self, file_id: str, sheet: str = "", col: str = "A", validation_type: str = "list", values: str = "", __user__=None, __request__=None) -> str:
+        """Add data validation to an Excel column. Types: list, whole, decimal, date. values: comma-separated for list, or 'min,max' for numeric."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype not in ("xlsx","xls"): return json.dumps({"error": "Data validation only for Excel files"})
+        from openpyxl import load_workbook
+        from openpyxl.worksheet.datavalidation import DataValidation
+        wb = load_workbook(io.BytesIO(file_bytes))
+        ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+        col_letter = col.upper().replace("COL","").replace("COLUMN","").strip()
+        if not col_letter.isalpha(): col_letter = "A"
+        max_row = ws.max_row or 100
+        cell_range = col_letter + "2:" + col_letter + str(max_row)
+        if validation_type == "list":
+            vals = [v.strip() for v in values.split(",") if v.strip()]
+            formula = '"' + ",".join(vals) + '"'
+            dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+        elif validation_type == "whole":
+            parts = values.split(",")
+            mn = int(parts[0]) if parts else 0
+            mx = int(parts[1]) if len(parts) > 1 else 100
+            dv = DataValidation(type="whole", operator="between", formula1=str(mn), formula2=str(mx))
+        elif validation_type == "decimal":
+            parts = values.split(",")
+            mn = float(parts[0]) if parts else 0
+            mx = float(parts[1]) if len(parts) > 1 else 100
+            dv = DataValidation(type="decimal", operator="between", formula1=str(mn), formula2=str(mx))
+        elif validation_type == "date":
+            dv = DataValidation(type="date", operator="greaterThan", formula1="2000-01-01")
+        else: return json.dumps({"error": "Unknown type: " + str(validation_type)})
+        dv.error = "Invalid value"
+        dv.errorTitle = "Validation Error"
+        ws.add_data_validation(dv)
+        dv.add(cell_range)
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url: return "Data validation added to column " + str(col_letter) + ": [" + str(fname) + "](" + str(url) + ")"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.4.0: Named Ranges ---
+    async def add_named_range(self, file_id: str, name: str, range_str: str = "", __user__=None, __request__=None) -> str:
+        """Define a named range in Excel. range_str: 'A1:B10' or auto-detected from active sheet."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype not in ("xlsx","xls"): return json.dumps({"error": "Named ranges only for Excel"})
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+        from openpyxl.workbook.defined_name import DefinedName
+        wb = load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        if not range_str:
+            range_str = "A1:" + get_column_letter(ws.max_column) + str(ws.max_row)
+        dn = DefinedName(name, attr_text=ws.title + "!$" + range_str.replace(":", ":$"))
+        wb.defined_names.add(dn)
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url: return "Named range '" + str(name) + "' = " + str(range_str) + ": [" + str(fname) + "](" + str(url) + ")"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.4.0: Slide Transitions ---
+    async def add_slide_transitions(self, file_id: str, transition_type: str = "fade", duration: float = 0.5, __user__=None, __request__=None) -> str:
+        """Add transitions to all slides in a PPTX. Types: fade, push, wipe, split, random."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype != "pptx": return json.dumps({"error": "Transitions only for PPTX"})
+        from pptx import Presentation
+        from pptx.util import Pt
+        prs = Presentation(io.BytesIO(file_bytes))
+        transitions = {"fade": 0, "push": 1, "wipe": 2, "split": 3, "random": 4}
+        ttype = transitions.get(transition_type, 0)
+        for slide in prs.slides:
+            try:
+                from pptx.oxml.ns import qn
+                trans_elem = slide._element.find(qn('p:transition'))
+                if trans_elem is None:
+                    from lxml import etree
+                    trans_elem = etree.SubElement(slide._element, qn('p:transition'))
+                if transition_type == "fade":
+                    etree.SubElement(trans_elem, qn('p:fade'))
+                elif transition_type == "push":
+                    etree.SubElement(trans_elem, qn('p:push'))
+                elif transition_type == "wipe":
+                    etree.SubElement(trans_elem, qn('p:wipe'))
+                elif transition_type == "split":
+                    etree.SubElement(trans_elem, qn('p:split'))
+                trans_elem.set('advTm', str(int(duration * 1000)))
+            except Exception:
+                pass
+        buf = io.BytesIO(); prs.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if url: return "Transitions added (" + str(transition_type) + "): [" + str(fname) + "](" + str(url) + ")"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.4.0: Export to HTML ---
+    async def export_to_html(self, file_id: str, __user__=None, __request__=None) -> str:
+        """Export any Office file to a styled HTML page."""
+        import io

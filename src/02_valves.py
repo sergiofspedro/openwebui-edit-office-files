@@ -5,5 +5,6 @@
         )
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
+        language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
         pass
 
