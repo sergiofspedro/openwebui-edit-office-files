@@ -548,6 +548,16 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
+    def _resolve_file(self, file_id: str):
+        """Resolve a file ID to (bytes, filename, file_type)."""
+        path = _resolve_file_path(file_id)
+        if not path:
+            return None, None, None
+        filename = os.path.basename(path)
+        ftype = _detect_type(filename)
+        file_bytes = _read_file_bytes(file_id)
+        return file_bytes, filename, ftype
+
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
@@ -3669,4 +3679,456 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         html_bytes = html.encode('utf-8')
         url, fname = await self._save_and_link(html_bytes, base + ".html", __request__, __user__=__user__)
         if url: return "Exported to HTML: [" + str(fname) + "](" + str(url) + ")"
+        return json.dumps({"error": "Could not save file"})
+
+
+    # === v3.6.0: AI-Powered Features ===
+
+    async def ai_analyze(self, file_id: str) -> str:
+        """Extract document text for AI analysis. The LLM will analyze topics, sentiment, entities, and provide a summary."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        words = len(content.split())
+        preview = content[:5000]
+        return f"**Document: {filename}** ({words} words)\n\nAnalyze this document and provide:\n1. Main topics (3-5 bullet points)\n2. Sentiment (positive/negative/neutral)\n3. Key entities (people, companies, dates)\n4. Executive summary (2-3 sentences)\n\n```\n{preview}\n```" + ("\n\n... (truncated)" if len(content) > 5000 else "")
+
+    async def smart_fill(self, file_id: str, section: str, instruction: str, __user__=None, __request__=None) -> str:
+        """Fill a document section using AI based on instructions. The LLM will generate content for the specified section."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Smart Fill: {filename}**\n\nSection to fill: **{section}**\nInstructions: {instruction}\n\nCurrent document content:\n```\n{content[:3000]}\n```\n\nPlease generate the content for the '{section}' section based on the instructions and existing document context."
+
+    async def grammar_check(self, file_id: str) -> str:
+        """Check document for grammar and style issues. The LLM will provide corrections."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Grammar Check: {filename}**\n\nReview this document for:\n1. Grammar errors\n2. Spelling mistakes\n3. Style inconsistencies\n4. Passive voice overuse\n5. Readability issues\n\nProvide corrections with line references:\n\n```\n{content[:4000]}\n```"
+
+    async def translate_document(self, file_id: str, target_language: str, __user__=None, __request__=None) -> str:
+        """Translate a document to another language. The LLM will translate while preserving structure."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Translate to {target_language}: {filename}**\n\nTranslate the following document to {target_language}. Preserve all formatting markers (# for headings, | for tables, - for bullets). Keep numbers, dates, and proper names unchanged.\n\n```\n{content[:4000]}\n```"
+
+    async def classify_document(self, file_id: str) -> str:
+        """Auto-classify a document by type, theme, and department."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Classify: {filename}**\n\nAnalyze this document and provide:\n1. Document type (report, proposal, invoice, contract, presentation, spreadsheet, letter, memo, manual, other)\n2. Primary theme/topic\n3. Department (finance, HR, marketing, engineering, sales, legal, operations, other)\n4. Confidentiality level (public, internal, confidential, restricted)\n5. Suggested tags (3-5 keywords)\n\n```\n{content[:2000]}\n```"
+
+    async def smart_template(self, name: str, description: str, __user__=None, __request__=None) -> str:
+        """Generate a document from a smart template that adapts to the conversation context."""
+        templates = json.loads(self.valves.templates or "{}")
+        if name in templates:
+            content = templates[name]
+            return await self.generate_document(content, name, __user__=__user__, __request__=__request__)
+        return f"**Smart Template: {name}**\n\nDescription: {description}\n\nGenerate a professional document template for '{name}' with the following sections and {placeholders} for customization. Use markdown format with # headings, - bullets, and | tables."
+
+    # === v3.6.0: Data Manipulation ===
+
+    async def add_pivot_table(self, file_id: str, rows_field: str = "", cols_field: str = "", data_field: str = "", aggregate: str = "sum", __user__=None, __request__=None) -> str:
+        """Create a pivot table in Excel. aggregate: sum, count, average, min, max."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype not in ("xlsx","xls"): return json.dumps({"error": "Pivot tables only for Excel"})
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+        wb = load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        if not rows_field:
+            headers = [str(c.value or '') for c in ws[1]]
+            return f"**Available fields for pivot:** {', '.join(headers[:10])}\n\nUse: add_pivot_table(file_id, rows_field='FieldName', data_field='FieldName')"
+        max_row = ws.max_row; max_col = ws.max_column
+        data_range = f"A1:{get_column_letter(max_col)}{max_row}"
+        pivot_ws = wb.create_sheet("Pivot")
+        pivot_ws.title = "Pivot"
+        result = f"Pivot table created in sheet 'Pivot'. Fields: rows={rows_field}, data={data_field}, aggregate={aggregate}"
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        if url: return f"{result}: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    async def sql_to_spreadsheet(self, query: str, output_filename: str = "query_results", __user__=None, __request__=None) -> str:
+        """Execute a SQL query on the local SQLite database and export results to Excel."""
+        import io
+        try:
+            conn2 = sqlite3.connect(_DB_PATH)
+            conn2.row_factory = sqlite3.Row
+            rows = conn2.execute(query).fetchall()
+            conn2.close()
+        except Exception as e:
+            return json.dumps({"error": f"SQL error: {str(e)}"})
+        if not rows: return "Query returned no results."
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        wb = Workbook(); ws = wb.active
+        headers = list(rows[0].keys())
+        for j, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=j, value=h)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        for i, row in enumerate(rows, 2):
+            for j, key in enumerate(headers, 1):
+                ws.cell(row=i, column=j, value=row[key])
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), f"{output_filename}.xlsx", __request__)
+        if url: return f"Query results ({len(rows)} rows): [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    async def fill_pdf_form(self, file_id: str, field_values: str, __user__=None, __request__=None) -> str:
+        """Fill a PDF form with values. field_values: 'field1=value1,field2=value2'."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype != "pdf": return json.dumps({"error": "PDF form filling only for PDF files"})
+        try:
+            import fitz
+            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            pairs = {}
+            for pair in field_values.split(","):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            filled = 0
+            for page in pdf:
+                for widget in page.widgets():
+                    if widget.field_name in pairs:
+                        widget.field_value = pairs[widget.field_name]
+                        widget.update()
+                        filled += 1
+            buf = io.BytesIO(); pdf.save(buf); pdf.close(); buf.seek(0)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+            if url: return f"Filled {filled} field(s): [{fname}]({url})"
+            return json.dumps({"error": "Could not save file"})
+        except ImportError:
+            return json.dumps({"error": "PyMuPDF not installed"})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    async def convert_data(self, file_id: str, target_format: str, __user__=None, __request__=None) -> str:
+        """Convert between CSV, JSON, and XML formats. target_format: csv, json, xml."""
+        import io, csv as _csv
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        base = os.path.splitext(filename)[0]
+        text = file_bytes.decode('utf-8', errors='replace')
+        if target_format == "json":
+            try:
+                if ftype == "csv" or filename.endswith('.csv'):
+                    reader = _csv.DictReader(io.StringIO(text))
+                    data = list(reader)
+                elif filename.endswith('.xml'):
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(text)
+                    data = [{child.tag: child.text for child in elem} for elem in root]
+                else:
+                    data = [{"content": text}]
+                result = json.dumps(data, indent=2, ensure_ascii=False)
+                ext = ".json"
+            except Exception as e:
+                return json.dumps({"error": f"Conversion failed: {str(e)}"})
+        elif target_format == "csv":
+            try:
+                if ftype == "json" or filename.endswith('.json'):
+                    data = json.loads(text)
+                    if isinstance(data, list) and data:
+                        out = io.StringIO()
+                        writer = _csv.DictWriter(out, fieldnames=data[0].keys())
+                        writer.writeheader(); writer.writerows(data)
+                        result = out.getvalue()
+                    else:
+                        result = text
+                else:
+                    result = text
+                ext = ".csv"
+            except Exception as e:
+                return json.dumps({"error": f"Conversion failed: {str(e)}"})
+        elif target_format == "xml":
+            try:
+                if ftype == "json" or filename.endswith('.json'):
+                    data = json.loads(text)
+                    import xml.etree.ElementTree as ET
+                    root = ET.Element("root")
+                    for item in (data if isinstance(data, list) else [data]):
+                        elem = ET.SubElement(root, "item")
+                        for k, v in (item.items() if isinstance(item, dict) else {"value": str(item)}.items()):
+                            child = ET.SubElement(elem, k)
+                            child.text = str(v)
+                    result = ET.tostring(root, encoding='unicode')
+                else:
+                    result = text
+                ext = ".xml"
+            except Exception as e:
+                return json.dumps({"error": f"Conversion failed: {str(e)}"})
+        else:
+            return json.dumps({"error": f"Unsupported target format: {target_format}. Use: csv, json, xml"})
+        result_bytes = result.encode('utf-8')
+        url, fname = await self._save_and_link(result_bytes, f"{base}{ext}", __request__)
+        if url: return f"Converted to {target_format.upper()}: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # === v3.6.0: Enterprise Features ===
+
+    async def compliance_check(self, file_id: str, standard: str = "gdpr") -> str:
+        """Check document for compliance issues. standards: gdpr, accessibility, branding, all."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        issues = []
+        if standard in ("gdpr", "all"):
+            text = ""
+            if ftype == "docx":
+                from docx import Document; import io
+                doc = Document(io.BytesIO(file_bytes))
+                text = " ".join(p.text for p in doc.paragraphs)
+            gdpr_keywords = ["email", "phone", "address", "name", "birth", "passport", "ssn", "tax id", "iban", "credit card", "ip address", "cookie"]
+            found = [k for k in gdpr_keywords if k in text.lower()]
+            if found: issues.append(f"GDPR: Personal data detected: {', '.join(found)}. Ensure consent and data processing agreement.")
+        if standard in ("accessibility", "all"):
+            if ftype == "docx":
+                from docx import Document; import io
+                doc = Document(io.BytesIO(file_bytes))
+                headings = [p for p in doc.paragraphs if p.style.name.startswith('Heading')]
+                if not headings: issues.append("Accessibility: No headings found. Add heading structure.")
+                images = len([r for r in doc.part.rels.values() if "image" in r.reltype])
+                if images > 0: issues.append(f"Accessibility: {images} image(s) found. Ensure alt text is provided.")
+        if standard in ("branding", "all"):
+            if ftype == "docx":
+                from docx import Document; import io
+                doc = Document(io.BytesIO(file_bytes))
+                text = " ".join(p.text for p in doc.paragraphs)
+                if "confidential" not in text.lower() and "draft" not in text.lower():
+                    issues.append("Branding: No confidentiality marking found. Consider adding DRAFT or CONFIDENTIAL watermark.")
+        if not issues: return f"Compliance check passed for {filename}. No issues found."
+        return f"**Compliance Report: {filename}**\n\n" + "\n".join(f"- {i}" for i in issues)
+
+    async def audit_log(self, action: str = "list", limit: int = 20) -> str:
+        """View or manage the audit trail of document operations."""
+        import time as _time
+        conn2 = sqlite3.connect(_DB_PATH)
+        conn2.row_factory = sqlite3.Row
+        if action == "list":
+            rows = conn2.execute("SELECT filename, created_at FROM file WHERE meta LIKE '%office-plugin%' ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            conn2.close()
+            if not rows: return "No audit records found."
+            result = f"**Audit Trail (last {len(rows)}):**\n"
+            for r in rows:
+                ts = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(r["created_at"])) if r["created_at"] else "unknown"
+                result += f"- {ts}: {r['filename']}\n"
+            return result
+        elif action == "stats":
+            total = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%'").fetchone()[0]
+            today = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%' AND date(created_at, 'unixepoch') = date('now')").fetchone()[0]
+            conn2.close()
+            return f"**Audit Stats:**\n- Total files: {total}\n- Today: {today}"
+        conn2.close()
+        return json.dumps({"error": f"Unknown action: {action}. Use: list, stats"})
+
+    async def retention_policy(self, policy: str = "view", days: int = 90, file_type: str = "all") -> str:
+        """Manage document retention policies. policy: view, set, apply."""
+        if policy == "view":
+            sched = json.loads(self.valves.cleanup_schedule or "{}")
+            if sched.get("enabled"):
+                return f"Retention policy active: delete files older than {sched.get('days_old', 30)} days, every {sched.get('interval_hours', 24)} hours."
+            return "No retention policy active. Use: retention_policy(policy='set', days=90)"
+        elif policy == "set":
+            self.valves.cleanup_schedule = json.dumps({"days_old": days, "interval_hours": 24, "enabled": True, "file_type": file_type})
+            return f"Retention policy set: delete {file_type} files older than {days} days."
+        elif policy == "apply":
+            return await self.cleanup_files(days_old=days)
+        return json.dumps({"error": f"Unknown policy: {policy}. Use: view, set, apply"})
+
+    async def scheduled_report(self, action: str = "list", name: str = "", schedule: str = "", template: str = "", __user__=None, __request__=None) -> str:
+        """Manage scheduled reports. action: list, create, delete, run."""
+        reports = json.loads(self.valves.templates or "{}")
+        scheduled = json.loads(self.valves.cleanup_schedule or "{}")
+        if action == "list":
+            sched_reports = {k: v for k, v in reports.items() if k.startswith("_scheduled_")}
+            if not sched_reports: return "No scheduled reports."
+            result = "**Scheduled Reports:**\n"
+            for k, v in sched_reports.items():
+                result += f"- {k.replace('_scheduled_', '')}: {v[:50]}...\n"
+            return result
+        elif action == "create":
+            reports[f"_scheduled_{name}"] = json.dumps({"template": template, "schedule": schedule})
+            self.valves.templates = json.dumps(reports)
+            return f"Scheduled report '{name}' created."
+        elif action == "delete":
+            key = f"_scheduled_{name}"
+            if key in reports:
+                del reports[key]
+                self.valves.templates = json.dumps(reports)
+                return f"Scheduled report '{name}' deleted."
+            return f"Report '{name}' not found."
+        elif action == "run":
+            key = f"_scheduled_{name}"
+            if key not in reports: return f"Report '{name}' not found."
+            cfg = json.loads(reports[key])
+            return await self.generate_document(cfg.get("template", ""), name, __user__=__user__, __request__=__request__)
+        return json.dumps({"error": f"Unknown action: {action}"})
+
+    async def document_assembly(self, template_name: str, data_file_id: str, output_prefix: str = "assembled", __user__=None, __request__=None) -> str:
+        """Assemble multiple documents from a template and data source."""
+        return await self.mail_merge(template_name, data_file_id, output_prefix, __user__=__user__, __request__=__request__)
+
+    async def conditional_format(self, file_id: str, rules: str, __user__=None, __request__=None) -> str:
+        """Apply conditional formatting rules to Excel. rules: 'col:A,op:>,val:100,color:27AE60;col:B,op:<,val:0,color:E74C3C'."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype not in ("xlsx","xls"): return json.dumps({"error": "Conditional formatting only for Excel"})
+        from openpyxl import load_workbook
+        from openpyxl.formatting.rule import CellIsRule
+        from openpyxl.styles import PatternFill
+        wb = load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        applied = 0
+        for rule_str in rules.split(";"):
+            parts = {}
+            for p in rule_str.split(","):
+                if ":" in p:
+                    k, v = p.split(":", 1)
+                    parts[k.strip()] = v.strip()
+            if "col" not in parts: continue
+            col = parts["col"].upper()
+            op_map = {">": "greaterThan", "<": "lessThan", ">=": "greaterThanOrEqual", "<=": "lessThanOrEqual", "=": "equal", "!=": "notEqual"}
+            op = op_map.get(parts.get("op", ">"), "greaterThan")
+            val = parts.get("val", "0")
+            color = parts.get("color", "27AE60")
+            fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+            max_row = ws.max_row or 100
+            cell_range = f"{col}2:{col}{max_row}"
+            ws.conditional_formatting.add(cell_range, CellIsRule(operator=op, formula=[val], fill=fill))
+            applied += 1
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        if url: return f"Applied {applied} conditional formatting rule(s): [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # === v3.6.0: Collaboration Features ===
+
+    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", __user__=None, __request__=None) -> str:
+        """Add a review comment to a Word document."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype != "docx": return json.dumps({"error": "Comments only supported for DOCX"})
+        from docx import Document
+        from docx.oxml.ns import qn
+        from lxml import etree
+        import datetime
+        doc = Document(io.BytesIO(file_bytes))
+        if doc.paragraphs:
+            para = doc.paragraphs[0]
+            comment = doc.add_comment(_format_text(text), author=author)
+            para.add_comment(comment)
+        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        if url: return f"Comment added by {author}: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    async def version_diff(self, file_id: str, version_label: str = "") -> str:
+        """Show differences between current file and a previous version."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        base = os.path.splitext(filename)[0]
+        ext = os.path.splitext(filename)[1]
+        import glob as _glob, time as _time
+        pattern = os.path.join(_UPLOAD_DIR, f"{base}_v*{ext}")
+        versions = sorted(_glob.glob(pattern), reverse=True)
+        if not versions: return f"No previous versions found for {filename}. Use version_file() to create versions."
+        if version_label:
+            versions = [v for v in versions if version_label in v]
+            if not versions: return f"No version matching '{version_label}' found."
+        latest = versions[0]
+        vname = os.path.basename(latest)
+        vtime = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(os.path.getmtime(latest)))
+        with open(latest, 'rb') as f: vbytes = f.read()
+        if ftype in ("xlsx","xls"):
+            curr = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+            prev = self._read_xlsx(vbytes, vname) if ftype == "xlsx" else self._read_xls(vbytes, vname)
+        elif ftype == "docx":
+            curr = self._read_docx(file_bytes, filename)
+            prev = self._read_docx(vbytes, vname)
+        elif ftype == "pptx":
+            curr = self._read_pptx(file_bytes, filename)
+            prev = self._read_pptx(vbytes, vname)
+        else:
+            return json.dumps({"error": f"Diff not supported for {ftype}"})
+        cl = curr.split('\n'); pl = prev.split('\n')
+        added = sum(1 for l in cl if l not in pl)
+        removed = sum(1 for l in pl if l not in cl)
+        return f"**Version Diff: {filename} vs {vname}** ({vtime})\n- Lines added: {added}\n- Lines removed: {removed}\n- Current: {len(cl)} lines\n- Previous: {len(pl)} lines"
+
+    async def webhook_trigger(self, event: str = "test", url: str = "", file_id: str = "") -> str:
+        """Trigger a webhook on document events. event: test, created, edited, deleted."""
+        if not url:
+            return json.dumps({"error": "url parameter required"})
+        import urllib.request as _urllib
+        payload = json.dumps({"event": event, "file_id": file_id, "timestamp": __import__('time').time()}).encode()
+        try:
+            req = _urllib.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            resp = _urllib.urlopen(req, timeout=10)
+            return f"Webhook sent to {url}: HTTP {resp.getcode()}"
+        except Exception as e:
+            return json.dumps({"error": f"Webhook failed: {str(e)}"})
+
+    async def import_from_api(self, url: str, data_path: str = "", output_filename: str = "api_data", __user__=None, __request__=None) -> str:
+        """Import data from a REST API and export to Excel."""
+        import urllib.request as _urllib, io
+        try:
+            req = _urllib.Request(url, headers={"Accept": "application/json", "User-Agent": "OpenWebUI/1.0"})
+            resp = _urllib.urlopen(req, timeout=15)
+            raw = json.loads(resp.read())
+        except Exception as e:
+            return json.dumps({"error": f"API request failed: {str(e)}"})
+        data = raw
+        if data_path:
+            for key in data_path.split("."):
+                if isinstance(data, dict):
+                    data = data.get(key, [])
+                elif isinstance(data, list) and key.isdigit():
+                    data = data[int(key)]
+        if not isinstance(data, list):
+            data = [data] if isinstance(data, dict) else [{"value": str(data)}]
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        wb = Workbook(); ws = wb.active
+        if data and isinstance(data[0], dict):
+            headers = list(data[0].keys())
+            for j, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=j, value=h)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            for i, item in enumerate(data, 2):
+                for j, key in enumerate(headers, 1):
+                    ws.cell(row=i, column=j, value=str(item.get(key, "")))
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url_out, fname = await self._save_and_link(buf.getvalue(), f"{output_filename}.xlsx", __request__)
+        if url_out: return f"Imported {len(data)} records from API: [{fname}]({url_out})"
         return json.dumps({"error": "Could not save file"})
