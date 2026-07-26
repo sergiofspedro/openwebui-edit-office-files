@@ -13,15 +13,15 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
-    # -----------------------------------------------------------------
-    # Internal: save and return markdown link
-    # -----------------------------------------------------------------
-    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None) -> tuple:
-        """Save file to Open WebUI uploads dir, register in DB, return download URL."""
-        import base64 as _b64
-        import hashlib
-        import time as _time
-        import uuid as _uuid
+    def _resolve_file(self, file_id: str):
+        """Resolve a file ID to (bytes, filename, file_type)."""
+        path = _resolve_file_path(file_id)
+        if not path:
+            return None, None, None
+        filename = os.path.basename(path)
+        ftype = _detect_type(filename)
+        file_bytes = _read_file_bytes(file_id)
+        return file_bytes, filename, ftype
     async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None) -> tuple:
         """Save file to Open WebUI uploads dir, register in DB, return download URL."""
         import base64 as _b64
@@ -103,6 +103,19 @@ class Tools:
 
     # -----------------------------------------------------------------
     # READ
+    # -----------------------------------------------------------------
+    def _resolve_file(self, file_id: str):
+        """Resolve a file ID to (bytes, filename, file_type)."""
+        path = _resolve_file_path(file_id)
+        if not path:
+            return None, None, None
+        filename = os.path.basename(path)
+        ftype = _detect_type(filename)
+        file_bytes = _read_file_bytes(file_id)
+        return file_bytes, filename, ftype
+
+    # -----------------------------------------------------------------
+    # Internal: save and return markdown link
     # -----------------------------------------------------------------
     async def _progress(self, current: int, total: int, operation: str = "Processing") -> None:
         """Emit progress via __event_emitter__ if available."""

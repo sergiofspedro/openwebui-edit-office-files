@@ -1,176 +1,532 @@
-    async def generate_document(self, content: str, title: str = "Document", theme: str = "professional", __user__=None, __request__=None) -> str:
-        """Generate a professional Word document with modern styling and themes.
-
-        Args:
-            content: Markdown-formatted content
-            title: Document title (used for cover page and filename)
-            theme: Visual theme - professional, modern, creative, corporate, minimal, elegant
-        Returns:
-            Markdown link to the generated file
-        """
-        try:
-            from docx import Document
-            from docx.shared import Inches, Pt, Cm, RGBColor, Emu
-            from docx.enum.text import WD_ALIGN_PARAGRAPH
-            from docx.enum.table import WD_TABLE_ALIGNMENT
-            from docx.oxml.ns import qn, nsdecls
-            from docx.oxml import parse_xml
-            import datetime
-
-            doc = Document()
-
-            # --- Page Setup ---
-            section = doc.sections[0]
-            section.top_margin = Cm(2.0)
-            section.bottom_margin = Cm(2.0)
-            section.left_margin = Cm(2.5)
-            section.right_margin = Cm(2.5)
-
-            # --- Color Themes ---
-            themes = {
-                "professional": {"primary": "1F4E79", "accent": "2E75B6", "light": "D6E4F0", "text": "333333"},
-                "modern": {"primary": "2D3436", "accent": "6C5CE7", "light": "DFE6E9", "text": "2D3436"},
-                "creative": {"primary": "E17055", "accent": "FDCB6E", "light": "FFF3E0", "text": "2D3436"},
-                "corporate": {"primary": "003366", "accent": "CC0000", "light": "E8EEF4", "text": "1A1A1A"},
-                "minimal": {"primary": "000000", "accent": "666666", "light": "F5F5F5", "text": "333333"},
-                "elegant": {"primary": "4A235A", "accent": "8E44AD", "light": "F3E5F5", "text": "1A1A1A"},
-            }
-            colors = themes.get(theme, themes["professional"])
-
-            def hex_to_rgb(hex_color):
-                return RGBColor(int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16))
-
-            # --- Default Font ---
-            style = doc.styles['Normal']
-            font = style.font
-            font.name = 'Calibri'
-            font.size = Pt(11)
-            font.color.rgb = hex_to_rgb(colors["text"])
-            style.paragraph_format.space_after = Pt(8)
-            style.paragraph_format.line_spacing = 1.15
-
-            # --- Heading Styles ---
-            for i in range(1, 4):
-                heading_style = doc.styles['Heading %d' % i]
-                heading_style.font.name = 'Calibri'
-                heading_style.font.color.rgb = hex_to_rgb(colors["primary"])
-                if i == 1:
-                    heading_style.font.size = Pt(24)
-                    heading_style.paragraph_format.space_before = Pt(24)
-                    heading_style.paragraph_format.space_after = Pt(12)
-                elif i == 2:
-                    heading_style.font.size = Pt(18)
-                    heading_style.paragraph_format.space_before = Pt(18)
-                    heading_style.paragraph_format.space_after = Pt(8)
-                else:
-                    heading_style.font.size = Pt(14)
-                    heading_style.paragraph_format.space_before = Pt(12)
-                    heading_style.paragraph_format.space_after = Pt(6)
-
-            # --- Cover Page ---
-            cover_table = doc.add_table(rows=1, cols=1)
-            cover_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            cell = cover_table.rows[0].cells[0]
-            cell.width = Inches(6.5)
-            shading_elm = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["primary"]}"/>')
-            cell._tc.get_or_add_tcPr().append(shading_elm)
-
+    async def generate_document(self, content: str, title: str = "Document", theme: str = "professional", typography: str = "modern", __user__=None, __request__=None) -> str:
+        """Generate a professional Word document with modern styling, emojis, cards, and visual elements."""
+        from docx import Document
+        from docx.shared import Inches, Pt, Cm, RGBColor, Emu
+        from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from docx.oxml.ns import qn, nsdecls
+        from docx.oxml import parse_xml
+        from lxml import etree
+        import datetime, re as _re
+        
+        doc = Document()
+        section = doc.sections[0]
+        section.top_margin = Cm(2.0)
+        section.bottom_margin = Cm(2.0)
+        section.left_margin = Cm(2.5)
+        section.right_margin = Cm(2.5)
+        
+        # --- Color Palettes (10+) ---
+        palettes = {
+            "professional": {"primary": "1F4E79", "accent": "2E75B6", "light": "D6E4F0", "text": "333333", "bg": "FFFFFF", "success": "27AE60", "warning": "F39C12", "danger": "E74C3C", "info": "3498DB"},
+            "modern": {"primary": "2D3436", "accent": "6C5CE7", "light": "DFE6E9", "text": "2D3436", "bg": "FFFFFF", "success": "00B894", "warning": "FDCB6E", "danger": "FF7675", "info": "74B9FF"},
+            "creative": {"primary": "E17055", "accent": "FDCB6E", "light": "FFF3E0", "text": "2D3436", "bg": "FFFAF5", "success": "00B894", "warning": "FDCB6E", "danger": "D63031", "info": "6C5CE7"},
+            "corporate": {"primary": "003366", "accent": "CC0000", "light": "E8EEF4", "text": "1A1A1A", "bg": "FFFFFF", "success": "006633", "warning": "FF6600", "danger": "CC0000", "info": "0066CC"},
+            "minimal": {"primary": "000000", "accent": "666666", "light": "F5F5F5", "text": "333333", "bg": "FAFAFA", "success": "333333", "warning": "666666", "danger": "000000", "info": "999999"},
+            "elegant": {"primary": "4A235A", "accent": "8E44AD", "light": "F3E5F5", "text": "1A1A1A", "bg": "FDFBF7", "success": "27AE60", "warning": "D4AC0D", "danger": "C0392B", "info": "2980B9"},
+            "ocean": {"primary": "0A3D62", "accent": "38ADA9", "light": "D1F2EB", "text": "1E272E", "bg": "F8FFFE", "success": "079992", "warning": "F6B93B", "danger": "E55039", "info": "3C6382"},
+            "sunset": {"primary": "B33771", "accent": "FD7272", "light": "FFE4E4", "text": "2C3A47", "bg": "FFFBF5", "success": "58B19F", "warning": "F8B500", "danger": "E66767", "info": "786FA6"},
+            "forest": {"primary": "1B4332", "accent": "40916C", "light": "D8F3DC", "text": "1A1A1A", "bg": "F7FFF7", "success": "2D6A4F", "warning": "B7B73F", "danger": "D00000", "info": "52B788"},
+            "midnight": {"primary": "0F172A", "accent": "38BDF8", "light": "1E293B", "text": "F8FAFC", "bg": "0F172A", "success": "34D399", "warning": "FBBF24", "danger": "F87171", "info": "60A5FA"},
+        }
+        colors = palettes.get(theme, palettes["professional"])
+        
+        # --- Typography Presets ---
+        fonts = {
+            "modern": {"heading": "Calibri", "body": "Calibri"},
+            "classic": {"heading": "Georgia", "body": "Calibri"},
+            "serif": {"heading": "Cambria", "body": "Calibri"},
+            "sans": {"heading": "Arial", "body": "Arial"},
+        }
+        font_pair = fonts.get(typography, fonts["modern"])
+        
+        def hex_to_rgb(h):
+            return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+        
+        def add_colored_bar(doc, color_hex, height_pt=4):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
+            run = p.add_run(" ")
+            run.font.size = Pt(height_pt)
+            pPr = p._p.get_or_add_pPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color_hex}" w:val="clear"/>')
+            pPr.append(shd)
+        
+        def add_card_box(doc, lines, border_color, bg_color, icon="", title=""):
+            table = doc.add_table(rows=1, cols=1)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            cell = table.rows[0].cells[0]
+            cell.width = Inches(6.0)
+            tc = cell._tc
+            tcPr = tc.get_or_add_tcPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg_color}" w:val="clear"/>')
+            tcPr.append(shd)
+            borders = parse_xml(
+                f'<w:tcBorders {nsdecls("w")}>'
+                f'<w:left w:val="single" w:sz="24" w:space="8" w:color="{border_color}"/>'
+                f'<w:top w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+                f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+                f'<w:right w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+                f'</w:tcBorders>'
+            )
+            tcPr.append(borders)
             p = cell.paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(40)
-            p.paragraph_format.space_after = Pt(8)
-            run = p.add_run(_format_text(title))
-            run.font.size = Pt(28)
-            run.font.bold = True
-            run.font.color.rgb = RGBColor(255, 255, 255)
-            run.font.name = 'Calibri'
-
-            p = cell.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_after = Pt(30)
-            run = p.add_run(datetime.datetime.now().strftime("%B %d, %Y"))
-            run.font.size = Pt(12)
-            run.font.color.rgb = RGBColor(200, 200, 200)
-            run.font.name = 'Calibri'
-
-            doc.add_paragraph()
-
-            # --- Process Content ---
-            lines = content.split('\n')
-            table_rows = []
-            callout_lines = []
-
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(4)
+            if icon or title:
+                header_text = f"{icon} {title}" if icon and title else (icon or title)
+                run = p.add_run(_format_text(header_text))
+                run.font.size = Pt(13)
+                run.font.bold = True
+                run.font.name = font_pair["heading"]
+                run.font.color.rgb = hex_to_rgb(border_color)
             for line in lines:
-                line = line.strip()
-                if not line:
-                    if callout_lines:
-                        _add_callout_box(doc, callout_lines, colors, hex_to_rgb)
-                        callout_lines = []
-                    continue
-
-                if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
-                    level = line.count('#')
-                    text = _format_text(line.lstrip('#').strip())
-                    doc.add_heading(text, level=min(level, 3))
-                    continue
-
-                if line.startswith('> '):
-                    callout_lines.append(line[2:])
-                    continue
-                elif callout_lines:
-                    _add_callout_box(doc, callout_lines, colors, hex_to_rgb)
-                    callout_lines = []
-
-                if line.startswith('|') and line.endswith('|'):
-                    cells = [c.strip() for c in line.split('|')[1:-1]]
-                    if all(c.startswith('---') for c in cells):
-                        continue
-                    table_rows.append(cells)
-                    continue
-                elif table_rows:
-                    _add_professional_table(doc, table_rows, colors, hex_to_rgb)
-                    table_rows = []
-
-                if line.startswith('- ') or line.startswith('* '):
-                    text = _format_text(line[2:].strip())
-                    doc.add_paragraph(text, style='List Bullet')
-                    continue
-
-                if re.match(r'^\d+\.\s', line):
-                    text = _format_text(re.sub(r'^\d+\.\s', '', line))
-                    doc.add_paragraph(text, style='List Number')
-                    continue
-
-                text = _format_text(line)
-                doc.add_paragraph(text)
-
-            if table_rows:
-                _add_professional_table(doc, table_rows, colors, hex_to_rgb)
-
-            # --- Footer with page numbers ---
-            footer = section.footer
-            footer.is_linked_to_previous = False
-            p = footer.paragraphs[0]
+                p = cell.add_paragraph()
+                p.paragraph_format.space_before = Pt(2)
+                p.paragraph_format.space_after = Pt(2)
+                run = p.add_run(_format_text(line))
+                run.font.size = Pt(10)
+                run.font.name = font_pair["body"]
+                run.font.color.rgb = hex_to_rgb(colors["text"])
+            doc.add_paragraph()
+        
+        def add_kpi_card(doc, value, label, color_hex, icon=""):
+            table = doc.add_table(rows=1, cols=1)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            cell = table.rows[0].cells[0]
+            cell.width = Inches(2.8)
+            tc = cell._tc; tcPr = tc.get_or_add_tcPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
+            tcPr.append(shd)
+            borders = parse_xml(f'<w:tcBorders {nsdecls("w")}><w:top w:val="single" w:sz="12" w:space="0" w:color="{color_hex}"/><w:left w:val="single" w:sz="4" w:space="0" w:color="DDDDDD"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="DDDDDD"/><w:right w:val="single" w:sz="4" w:space="0" w:color="DDDDDD"/></w:tcBorders>')
+            tcPr.append(borders)
+            p = cell.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(12)
+            run = p.add_run(f"{icon} {value}" if icon else value)
+            run.font.size = Pt(24); run.font.bold = True
+            run.font.color.rgb = hex_to_rgb(color_hex); run.font.name = font_pair["heading"]
+            p2 = cell.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p2.paragraph_format.space_after = Pt(12)
+            run2 = p2.add_run(_format_text(label))
+            run2.font.size = Pt(9); run2.font.color.rgb = hex_to_rgb(colors["text"])
+            run2.font.name = font_pair["body"]
+        
+        def add_progress_bar(doc, label, percentage, color_hex):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(4)
+            p.paragraph_format.space_after = Pt(2)
+            run = p.add_run(f"{_format_text(label)}: {percentage}%")
+            run.font.size = Pt(10); run.font.bold = True
+            run.font.name = font_pair["body"]; run.font.color.rgb = hex_to_rgb(colors["text"])
+            table = doc.add_table(rows=1, cols=2)
+            table.alignment = WD_TABLE_ALIGNMENT.LEFT
+            filled = table.rows[0].cells[0]; empty = table.rows[0].cells[1]
+            filled.width = Inches(5.0 * percentage / 100)
+            empty.width = Inches(5.0 * (100 - percentage) / 100)
+            tcF = filled._tc; tcPrF = tcF.get_or_add_tcPr()
+            shdF = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color_hex}" w:val="clear"/>')
+            tcPrF.append(shdF)
+            tcE = empty._tc; tcPrE = tcE.get_or_add_tcPr()
+            shdE = parse_xml(f'<w:shd {nsdecls("w")} w:fill="E0E0E0" w:val="clear"/>')
+            tcPrE.append(shdE)
+            pF = filled.paragraphs[0]; runF = pF.add_run(" "); runF.font.size = Pt(6)
+            pE = empty.paragraphs[0]; runE = pE.add_run(" "); runE.font.size = Pt(6)
+        
+        def add_step_guide(doc, steps):
+            for i, step in enumerate(steps, 1):
+                p = doc.add_paragraph()
+                p.paragraph_format.space_before = Pt(6)
+                p.paragraph_format.space_after = Pt(2)
+                run = p.add_run(f"  {i}  ")
+                run.font.size = Pt(14); run.font.bold = True
+                run.font.color.rgb = RGBColor(255, 255, 255); run.font.name = font_pair["heading"]
+                rPr = run._r.get_or_add_rPr()
+                shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["primary"]}" w:val="clear"/>')
+                rPr.append(shd)
+                run2 = p.add_run(f"  {_format_text(step)}")
+                run2.font.size = Pt(11); run2.font.name = font_pair["body"]
+                run2.font.color.rgb = hex_to_rgb(colors["text"])
+        
+        def add_pull_quote(doc, text, author=""):
+            table = doc.add_table(rows=1, cols=1)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            cell = table.rows[0].cells[0]; cell.width = Inches(5.5)
+            tc = cell._tc; tcPr = tc.get_or_add_tcPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
+            tcPr.append(shd)
+            borders = parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="single" w:sz="36" w:space="12" w:color="{colors["accent"]}"/><w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/></w:tcBorders>')
+            tcPr.append(borders)
+            p = cell.paragraphs[0]; p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(4)
+            run = p.add_run(f'"{_format_text(text)}"')
+            run.font.size = Pt(14); run.font.italic = True
+            run.font.name = font_pair["heading"]; run.font.color.rgb = hex_to_rgb(colors["text"])
+            if author:
+                p2 = cell.add_paragraph(); p2.paragraph_format.space_after = Pt(12)
+                p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                run2 = p2.add_run(f"\u2014 {_format_text(author)}")
+                run2.font.size = Pt(10); run2.font.name = font_pair["body"]
+                run2.font.color.rgb = hex_to_rgb(colors["accent"])
+            doc.add_paragraph()
+        
+        def add_comparison_table(doc, headers, rows):
+            table = doc.add_table(rows=len(rows)+1, cols=len(headers))
+            table.style = 'Colorful Grid Accent 1'
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            for j, h in enumerate(headers):
+                cell = table.rows[0].cells[j]
+                cell.text = _format_text(h)
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        r.font.size = Pt(10); r.font.bold = True; r.font.name = font_pair["heading"]
+            for i, row in enumerate(rows):
+                for j, val in enumerate(row):
+                    if j < len(headers):
+                        cell = table.rows[i+1].cells[j]
+                        display = val
+                        if val.lower() in ("yes","true","sim","si","oui","ja"): display = "\u2705 " + val
+                        elif val.lower() in ("no","false","nao","non","nein"): display = "\u274c " + val
+                        elif val.lower() in ("partial","maybe","talvez"): display = "\u26a0\ufe0f " + val
+                        cell.text = _format_text(display)
+                        for p in cell.paragraphs:
+                            for r in p.runs:
+                                r.font.size = Pt(10); r.font.name = font_pair["body"]
+            doc.add_paragraph()
+        
+        def add_timeline(doc, events):
+            for i, (date, desc) in enumerate(events):
+                p = doc.add_paragraph()
+                p.paragraph_format.space_before = Pt(4)
+                p.paragraph_format.space_after = Pt(2)
+                icon = "\u25cf" if i == 0 else "\u25cb"
+                run = p.add_run(f"  {icon}  ")
+                run.font.size = Pt(12); run.font.color.rgb = hex_to_rgb(colors["accent"])
+                run.font.name = font_pair["heading"]
+                run2 = p.add_run(f"{_format_text(date)}  ")
+                run2.font.size = Pt(10); run2.font.bold = True
+                run2.font.name = font_pair["body"]; run2.font.color.rgb = hex_to_rgb(colors["primary"])
+                run3 = p.add_run(_format_text(desc))
+                run3.font.size = Pt(10); run3.font.name = font_pair["body"]
+                run3.font.color.rgb = hex_to_rgb(colors["text"])
+        
+        def add_status_badge(doc, text, status="info"):
+            colors_map = {"success": colors["success"], "warning": colors["warning"], "danger": colors["danger"], "info": colors["info"]}
+            icons = {"success": "\U0001f7e2", "warning": "\U0001f7e1", "danger": "\U0001f534", "info": "\U0001f535"}
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(2)
+            p.paragraph_format.space_after = Pt(2)
+            run = p.add_run(f" {icons.get(status, icons['info'])} {_format_text(text)} ")
+            run.font.size = Pt(10); run.font.bold = True
+            run.font.name = font_pair["body"]; run.font.color.rgb = hex_to_rgb(colors_map.get(status, colors["info"]))
+        
+        def add_visual_separator(doc, style="dots"):
+            separators = {"dots": "\u25cf \u25cf \u25cf", "line": "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501", "dash": "\u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500"}
+            p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run("Page ")
-            run.font.size = Pt(8)
-            run.font.color.rgb = hex_to_rgb(colors["accent"])
-            fldChar1 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
-            run._r.append(fldChar1)
-            instrText = parse_xml(f'<w:instrText {nsdecls("w")} xml:space="preserve"> PAGE </w:instrText>')
-            run._r.append(instrText)
-            fldChar2 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>')
-            run._r.append(fldChar2)
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(8)
+            run = p.add_run(separators.get(style, separators["dots"]))
+            run.font.size = Pt(8); run.font.color.rgb = hex_to_rgb(colors["accent"])
+        
+        # --- Default Style ---
+        style = doc.styles['Normal']
+        font = style.font; font.name = font_pair["body"]; font.size = Pt(11)
+        font.color.rgb = hex_to_rgb(colors["text"])
+        style.paragraph_format.space_after = Pt(8)
+        style.paragraph_format.line_spacing = 1.15
+        
+        for i in range(1, 4):
+            hs = doc.styles[f'Heading {i}']
+            hs.font.name = font_pair["heading"]
+            hs.font.color.rgb = hex_to_rgb(colors["primary"])
+            sizes = {1: 24, 2: 18, 3: 14}
+            hs.font.size = Pt(sizes.get(i, 14))
+            spaces = {1: (24, 12), 2: (18, 8), 3: (12, 6)}
+            hs.paragraph_format.space_before = Pt(spaces[i][0])
+            hs.paragraph_format.space_after = Pt(spaces[i][1])
+        
+        # --- Cover Page ---
+        add_colored_bar(doc, colors["primary"], 4)
+        cover_table = doc.add_table(rows=1, cols=1)
+        cover_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        cell = cover_table.rows[0].cells[0]; cell.width = Inches(6.5)
+        tc = cell._tc; tcPr = tc.get_or_add_tcPr()
+        shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["primary"]}" w:val="clear"/>')
+        tcPr.append(shd)
+        p = cell.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(40); p.paragraph_format.space_after = Pt(8)
+        run = p.add_run(_format_text(title))
+        run.font.size = Pt(28); run.font.bold = True
+        run.font.color.rgb = RGBColor(255, 255, 255); run.font.name = font_pair["heading"]
+        p2 = cell.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p2.paragraph_format.space_after = Pt(30)
+        run2 = p2.add_run(datetime.datetime.now().strftime("%B %d, %Y"))
+        run2.font.size = Pt(12); run2.font.color.rgb = RGBColor(200, 200, 200)
+        run2.font.name = font_pair["body"]
+        doc.add_paragraph()
+        
+        # --- Auto TOC ---
+        toc_added = False
+        
+        # --- Process Content ---
+        lines = content.split('\n')
+        in_card = False; card_lines = []; card_icon = ""; card_title = ""
+        in_kpi = False; kpi_data = []
+        in_timeline = False; timeline_data = []
+        in_steps = False; step_lines = []
+        in_quote = False; quote_text = ""; quote_author = ""
+        in_comparison = False; comp_headers = []; comp_rows = []
+        in_progress = False; progress_data = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_card:
+                    add_card_box(doc, card_lines, colors["accent"], colors["light"], card_icon, card_title)
+                    card_lines = []; in_card = False
+                if in_steps:
+                    add_step_guide(doc, step_lines)
+                    step_lines = []; in_steps = False
+                if in_timeline:
+                    add_timeline(doc, timeline_data)
+                    timeline_data = []; in_timeline = False
+                if in_comparison:
+                    add_comparison_table(doc, comp_headers, comp_rows)
+                    comp_headers = []; comp_rows = []; in_comparison = False
+                if in_progress:
+                    for lbl, pct, clr in progress_data:
+                        add_progress_bar(doc, lbl, pct, clr)
+                    progress_data = []; in_progress = False
+                continue
+            
+            # Card: > 📊 **Title** or > content
+            if line.startswith('> ') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison and not in_progress:
+                in_card = True
+                text = line[2:]
+                m = _re.match(r'^([\U0001F300-\U0001F9FF]\s*)?\*\*(.+?)\*\*', text)
+                if m:
+                    card_icon = m.group(1).strip() if m.group(1) else ""
+                    card_title = m.group(2)
+                    remaining = text[m.end():].strip()
+                    if remaining: card_lines.append(remaining)
+                else:
+                    card_lines.append(text)
+                continue
+            elif in_card and line.startswith('> '):
+                card_lines.append(line[2:])
+                continue
+            
+            # KPI: 📊 85% | Customer Satisfaction
+            if '|' in line and '%' in line and not in_card and not in_timeline and not in_steps and not in_quote and not in_comparison and not in_progress:
+                parts = [p.strip() for p in line.split('|')]
+                if len(parts) >= 2 and any('%' in p for p in parts):
+                    in_kpi = True
+                    kpi_data.append(parts)
+                    continue
+            elif in_kpi and '|' in line and '%' in line:
+                parts = [p.strip() for p in line.split('|')]
+                kpi_data.append(parts)
+                continue
+            elif in_kpi:
+                # Render KPI cards
+                kpi_table = doc.add_table(rows=1, cols=len(kpi_data))
+                kpi_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for j, kpi in enumerate(kpi_data):
+                    if j < len(kpi_data):
+                        val = kpi[0] if len(kpi) > 0 else ""
+                        lbl = kpi[1] if len(kpi) > 1 else ""
+                        icon_match = _re.match(r'^([\U0001F300-\U0001F9FF]\s*)', val)
+                        icon = icon_match.group(1).strip() if icon_match else ""
+                        if icon: val = val[len(icon):].strip()
+                        cell = kpi_table.rows[0].cells[j]
+                        cell.width = Inches(2.8)
+                        tcC = cell._tc; tcPrC = tcC.get_or_add_tcPr()
+                        shdC = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
+                        tcPrC.append(shdC)
+                        pC = cell.paragraphs[0]; pC.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        pC.paragraph_format.space_before = Pt(12)
+                        runC = pC.add_run(f"{icon} {val}" if icon else val)
+                        runC.font.size = Pt(24); runC.font.bold = True
+                        runC.font.color.rgb = hex_to_rgb(colors["primary"])
+                        runC.font.name = font_pair["heading"]
+                        pC2 = cell.add_paragraph(); pC2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        pC2.paragraph_format.space_after = Pt(12)
+                        runC2 = pC2.add_run(_format_text(lbl))
+                        runC2.font.size = Pt(9); runC2.font.color.rgb = hex_to_rgb(colors["text"])
+                        runC2.font.name = font_pair["body"]
+                doc.add_paragraph()
+                kpi_data = []; in_kpi = False
+            
+            # Timeline: 📅 2024 | Event description
+            if '|' in line and _re.match(r'^[\U0001F300-\U0001F9FF\s]*\d{4}', line) and not in_card and not in_kpi and not in_steps and not in_quote and not in_comparison and not in_progress:
+                in_timeline = True
+                parts = [p.strip() for p in line.split('|', 1)]
+                timeline_data.append((parts[0], parts[1] if len(parts) > 1 else ""))
+                continue
+            elif in_timeline and '|' in line and _re.match(r'^[\U0001F300-\U0001F9FF\s]*\d{4}', line):
+                parts = [p.strip() for p in line.split('|', 1)]
+                timeline_data.append((parts[0], parts[1] if len(parts) > 1 else ""))
+                continue
+            elif in_timeline:
+                add_timeline(doc, timeline_data)
+                timeline_data = []; in_timeline = False
+            
+            # Steps: 1. Step one / 2. Step two
+            if _re.match(r'^\d+\.\s', line) and not in_card and not in_kpi and not in_timeline and not in_quote and not in_comparison and not in_progress:
+                in_steps = True
+                step_lines.append(_re.sub(r'^\d+\.\s', '', line))
+                continue
+            elif in_steps and _re.match(r'^\d+\.\s', line):
+                step_lines.append(_re.sub(r'^\d+\.\s', '', line))
+                continue
+            elif in_steps:
+                add_step_guide(doc, step_lines)
+                step_lines = []; in_steps = False
+            
+            # Pull quote: "Quote text" — Author
+            if line.startswith('"') and line.endswith('"') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_comparison and not in_progress:
+                in_quote = True
+                quote_text = line.strip('"')
+                continue
+            elif in_quote and line.startswith('\u2014') or (in_quote and not line.startswith('"')):
+                quote_author = line.lstrip('\u2014 ').strip()
+                add_pull_quote(doc, quote_text, quote_author)
+                in_quote = False; quote_text = ""; quote_author = ""
+                continue
+            
+            # Comparison table: | Feature | A | B |
+            if line.startswith('|') and line.endswith('|') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_progress:
+                cells = [c.strip() for c in line.split('|')[1:-1]]
+                if all(c.startswith('---') for c in cells):
+                    continue
+                if not in_comparison:
+                    in_comparison = True
+                    comp_headers = cells
+                else:
+                    comp_rows.append(cells)
+                continue
+            elif in_comparison and line.startswith('|') and line.endswith('|'):
+                cells = [c.strip() for c in line.split('|')[1:-1]]
+                if not all(c.startswith('---') for c in cells):
+                    comp_rows.append(cells)
+                continue
+            elif in_comparison:
+                add_comparison_table(doc, comp_headers, comp_rows)
+                comp_headers = []; comp_rows = []; in_comparison = False
+            
+            # Progress: Label: 75%
+            if ':' in line and _re.search(r'(\d+)%', line) and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison:
+                in_progress = True
+                parts = line.split(':', 1)
+                lbl = parts[0].strip()
+                pct_match = _re.search(r'(\d+)%', parts[1])
+                pct = int(pct_match.group(1)) if pct_match else 0
+                progress_data.append((lbl, pct, colors["accent"]))
+                continue
+            elif in_progress and ':' in line and _re.search(r'(\d+)%', line):
+                parts = line.split(':', 1)
+                lbl = parts[0].strip()
+                pct_match = _re.search(r'(\d+)%', parts[1])
+                pct = int(pct_match.group(1)) if pct_match else 0
+                progress_data.append((lbl, pct, colors["accent"]))
+                continue
+            elif in_progress:
+                for lbl, pct, clr in progress_data:
+                    add_progress_bar(doc, lbl, pct, clr)
+                progress_data = []; in_progress = False
+            
+            # Status badge: @success Task complete
+            if line.startswith('@') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison and not in_progress:
+                parts = line[1:].split(None, 1)
+                status = parts[0].lower() if parts else "info"
+                text = parts[1] if len(parts) > 1 else ""
+                add_status_badge(doc, text, status)
+                continue
+            
+            # Visual separator: --- or ***
+            if line in ('---', '***', '...'):
+                style_map = {'---': 'line', '***': 'dots', '...': 'dash'}
+                add_visual_separator(doc, style_map.get(line, 'dots'))
+                continue
+            
+            # Headings with emoji
+            if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
+                level = line.count('#')
+                text = _format_text(line.lstrip('#').strip())
+                h = doc.add_heading(text, level=min(level, 3))
+                continue
+            
+            # Icon bullets
+            if line.startswith('- ') or line.startswith('* '):
+                text = _format_text(line[2:].strip())
+                icon = "\u2022"
+                if text.lower().startswith(('done','complete','yes','ok','success','conclu')):
+                    icon = "\u2705"
+                elif text.lower().startswith(('no','not','fail','error','wrong','nao')):
+                    icon = "\u274c"
+                elif text.lower().startswith(('warn','caution','careful','cuidado')):
+                    icon = "\u26a0\ufe0f"
+                elif text.lower().startswith(('note','info','note','nota')):
+                    icon = "\U0001f4cc"
+                elif text.lower().startswith(('idea','tip','suggestion','sugest')):
+                    icon = "\U0001f4a1"
+                p = doc.add_paragraph(f"{icon} {text}", style='List Bullet')
+                continue
+            
+            # Regular paragraph
+            text = _format_text(line)
+            p = doc.add_paragraph(text)
+        
+        # Render remaining
+        if in_card:
+            add_card_box(doc, card_lines, colors["accent"], colors["light"], card_icon, card_title)
+        if in_steps:
+            add_step_guide(doc, step_lines)
+        if in_timeline:
+            add_timeline(doc, timeline_data)
+        if in_comparison:
+            add_comparison_table(doc, comp_headers, comp_rows)
+        if in_progress:
+            for lbl, pct, clr in progress_data:
+                add_progress_bar(doc, lbl, pct, clr)
+        
+        # --- Branded Footer ---
+        footer = section.footer
+        footer.is_linked_to_previous = False
+        ft = footer.add_table(rows=1, cols=3, width=Inches(6.5))
+        ft.alignment = WD_TABLE_ALIGNMENT.CENTER
+        c1 = ft.rows[0].cells[0]; c1.width = Inches(2)
+        r1 = c1.paragraphs[0]; r1.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run1 = r1.add_run("Edit Office Files")
+        run1.font.size = Pt(8); run1.font.color.rgb = hex_to_rgb(colors["accent"])
+        run1.font.name = font_pair["body"]
+        c2 = ft.rows[0].cells[1]; c2.width = Inches(2.5)
+        r2 = c2.paragraphs[0]; r2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run2 = r2.add_run("Page ")
+        run2.font.size = Pt(8); run2.font.color.rgb = hex_to_rgb(colors["accent"])
+        run2.font.name = font_pair["body"]
+        fldChar1 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
+        run2._r.append(fldChar1)
+        instrText = parse_xml(f'<w:instrText {nsdecls("w")} xml:space="preserve"> PAGE </w:instrText>')
+        run2._r.append(instrText)
+        fldChar2 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>')
+        run2._r.append(fldChar2)
+        c3 = ft.rows[0].cells[2]; c3.width = Inches(2)
+        r3 = c3.paragraphs[0]; r3.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run3 = r3.add_run(datetime.datetime.now().strftime("%Y-%m-%d"))
+        run3.font.size = Pt(8); run3.font.color.rgb = hex_to_rgb(colors["accent"])
+        run3.font.name = font_pair["body"]
+        
+        # --- Save ---
+        file_bytes = io.BytesIO()
+        doc.save(file_bytes)
+        file_bytes.seek(0)
+        url, fname = await self._save_and_link(file_bytes.getvalue(), f"{title}.docx", __request__)
+        if url:
+            return f"Document created: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
 
-            out = io.BytesIO()
-            doc.save(out)
-            out.seek(0)
-            url, fname = await self._save_and_link(out.getvalue(), "%s.docx" % title, __request__)
-            if url:
-                return "Document created: [%s](%s)" % (fname, url)
-            return json.dumps({"error": "Could not save file"})
-        except Exception as e:
-            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def generate_slides(self, content: str, title: str = "Presentation", theme: str = "modern", __user__=None, __request__=None) -> str:
         """Generate professional PowerPoint slides with modern design.

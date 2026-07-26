@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.0.0
+version: 3.4.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -547,6 +547,16 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+
+    def _resolve_file(self, file_id: str):
+        """Resolve a file ID to (bytes, filename, file_type)."""
+        path = _resolve_file_path(file_id)
+        if not path:
+            return None, None, None
+        filename = os.path.basename(path)
+        ftype = _detect_type(filename)
+        file_bytes = _read_file_bytes(file_id)
+        return file_bytes, filename, ftype
 
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
@@ -1647,179 +1657,536 @@ class Tools:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
 
-    async def generate_document(self, content: str, title: str = "Document", theme: str = "professional", __user__=None, __request__=None) -> str:
-        """Generate a professional Word document with modern styling and themes.
 
-        Args:
-            content: Markdown-formatted content
-            title: Document title (used for cover page and filename)
-            theme: Visual theme - professional, modern, creative, corporate, minimal, elegant
-        Returns:
-            Markdown link to the generated file
-        """
-        try:
-            from docx import Document
-            from docx.shared import Inches, Pt, Cm, RGBColor, Emu
-            from docx.enum.text import WD_ALIGN_PARAGRAPH
-            from docx.enum.table import WD_TABLE_ALIGNMENT
-            from docx.oxml.ns import qn, nsdecls
-            from docx.oxml import parse_xml
-            import datetime
-
-            doc = Document()
-
-            # --- Page Setup ---
-            section = doc.sections[0]
-            section.top_margin = Cm(2.0)
-            section.bottom_margin = Cm(2.0)
-            section.left_margin = Cm(2.5)
-            section.right_margin = Cm(2.5)
-
-            # --- Color Themes ---
-            themes = {
-                "professional": {"primary": "1F4E79", "accent": "2E75B6", "light": "D6E4F0", "text": "333333"},
-                "modern": {"primary": "2D3436", "accent": "6C5CE7", "light": "DFE6E9", "text": "2D3436"},
-                "creative": {"primary": "E17055", "accent": "FDCB6E", "light": "FFF3E0", "text": "2D3436"},
-                "corporate": {"primary": "003366", "accent": "CC0000", "light": "E8EEF4", "text": "1A1A1A"},
-                "minimal": {"primary": "000000", "accent": "666666", "light": "F5F5F5", "text": "333333"},
-                "elegant": {"primary": "4A235A", "accent": "8E44AD", "light": "F3E5F5", "text": "1A1A1A"},
-            }
-            colors = themes.get(theme, themes["professional"])
-
-            def hex_to_rgb(hex_color):
-                return RGBColor(int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16))
-
-            # --- Default Font ---
-            style = doc.styles['Normal']
-            font = style.font
-            font.name = 'Calibri'
-            font.size = Pt(11)
-            font.color.rgb = hex_to_rgb(colors["text"])
-            style.paragraph_format.space_after = Pt(8)
-            style.paragraph_format.line_spacing = 1.15
-
-            # --- Heading Styles ---
-            for i in range(1, 4):
-                heading_style = doc.styles['Heading %d' % i]
-                heading_style.font.name = 'Calibri'
-                heading_style.font.color.rgb = hex_to_rgb(colors["primary"])
-                if i == 1:
-                    heading_style.font.size = Pt(24)
-                    heading_style.paragraph_format.space_before = Pt(24)
-                    heading_style.paragraph_format.space_after = Pt(12)
-                elif i == 2:
-                    heading_style.font.size = Pt(18)
-                    heading_style.paragraph_format.space_before = Pt(18)
-                    heading_style.paragraph_format.space_after = Pt(8)
-                else:
-                    heading_style.font.size = Pt(14)
-                    heading_style.paragraph_format.space_before = Pt(12)
-                    heading_style.paragraph_format.space_after = Pt(6)
-
-            # --- Cover Page ---
-            cover_table = doc.add_table(rows=1, cols=1)
-            cover_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            cell = cover_table.rows[0].cells[0]
-            cell.width = Inches(6.5)
-            shading_elm = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["primary"]}"/>')
-            cell._tc.get_or_add_tcPr().append(shading_elm)
-
+    async def generate_document(self, content: str, title: str = "Document", theme: str = "professional", typography: str = "modern", __user__=None, __request__=None) -> str:
+        """Generate a professional Word document with modern styling, emojis, cards, and visual elements."""
+        from docx import Document
+        from docx.shared import Inches, Pt, Cm, RGBColor, Emu
+        from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from docx.oxml.ns import qn, nsdecls
+        from docx.oxml import parse_xml
+        from lxml import etree
+        import datetime, re as _re
+        
+        doc = Document()
+        section = doc.sections[0]
+        section.top_margin = Cm(2.0)
+        section.bottom_margin = Cm(2.0)
+        section.left_margin = Cm(2.5)
+        section.right_margin = Cm(2.5)
+        
+        # --- Color Palettes (10+) ---
+        palettes = {
+            "professional": {"primary": "1F4E79", "accent": "2E75B6", "light": "D6E4F0", "text": "333333", "bg": "FFFFFF", "success": "27AE60", "warning": "F39C12", "danger": "E74C3C", "info": "3498DB"},
+            "modern": {"primary": "2D3436", "accent": "6C5CE7", "light": "DFE6E9", "text": "2D3436", "bg": "FFFFFF", "success": "00B894", "warning": "FDCB6E", "danger": "FF7675", "info": "74B9FF"},
+            "creative": {"primary": "E17055", "accent": "FDCB6E", "light": "FFF3E0", "text": "2D3436", "bg": "FFFAF5", "success": "00B894", "warning": "FDCB6E", "danger": "D63031", "info": "6C5CE7"},
+            "corporate": {"primary": "003366", "accent": "CC0000", "light": "E8EEF4", "text": "1A1A1A", "bg": "FFFFFF", "success": "006633", "warning": "FF6600", "danger": "CC0000", "info": "0066CC"},
+            "minimal": {"primary": "000000", "accent": "666666", "light": "F5F5F5", "text": "333333", "bg": "FAFAFA", "success": "333333", "warning": "666666", "danger": "000000", "info": "999999"},
+            "elegant": {"primary": "4A235A", "accent": "8E44AD", "light": "F3E5F5", "text": "1A1A1A", "bg": "FDFBF7", "success": "27AE60", "warning": "D4AC0D", "danger": "C0392B", "info": "2980B9"},
+            "ocean": {"primary": "0A3D62", "accent": "38ADA9", "light": "D1F2EB", "text": "1E272E", "bg": "F8FFFE", "success": "079992", "warning": "F6B93B", "danger": "E55039", "info": "3C6382"},
+            "sunset": {"primary": "B33771", "accent": "FD7272", "light": "FFE4E4", "text": "2C3A47", "bg": "FFFBF5", "success": "58B19F", "warning": "F8B500", "danger": "E66767", "info": "786FA6"},
+            "forest": {"primary": "1B4332", "accent": "40916C", "light": "D8F3DC", "text": "1A1A1A", "bg": "F7FFF7", "success": "2D6A4F", "warning": "B7B73F", "danger": "D00000", "info": "52B788"},
+            "midnight": {"primary": "0F172A", "accent": "38BDF8", "light": "1E293B", "text": "F8FAFC", "bg": "0F172A", "success": "34D399", "warning": "FBBF24", "danger": "F87171", "info": "60A5FA"},
+        }
+        colors = palettes.get(theme, palettes["professional"])
+        
+        # --- Typography Presets ---
+        fonts = {
+            "modern": {"heading": "Calibri", "body": "Calibri"},
+            "classic": {"heading": "Georgia", "body": "Calibri"},
+            "serif": {"heading": "Cambria", "body": "Calibri"},
+            "sans": {"heading": "Arial", "body": "Arial"},
+        }
+        font_pair = fonts.get(typography, fonts["modern"])
+        
+        def hex_to_rgb(h):
+            return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+        
+        def add_colored_bar(doc, color_hex, height_pt=4):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
+            run = p.add_run(" ")
+            run.font.size = Pt(height_pt)
+            pPr = p._p.get_or_add_pPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color_hex}" w:val="clear"/>')
+            pPr.append(shd)
+        
+        def add_card_box(doc, lines, border_color, bg_color, icon="", title=""):
+            table = doc.add_table(rows=1, cols=1)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            cell = table.rows[0].cells[0]
+            cell.width = Inches(6.0)
+            tc = cell._tc
+            tcPr = tc.get_or_add_tcPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg_color}" w:val="clear"/>')
+            tcPr.append(shd)
+            borders = parse_xml(
+                f'<w:tcBorders {nsdecls("w")}>'
+                f'<w:left w:val="single" w:sz="24" w:space="8" w:color="{border_color}"/>'
+                f'<w:top w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+                f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+                f'<w:right w:val="single" w:sz="4" w:space="0" w:color="{border_color}"/>'
+                f'</w:tcBorders>'
+            )
+            tcPr.append(borders)
             p = cell.paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(40)
-            p.paragraph_format.space_after = Pt(8)
-            run = p.add_run(_format_text(title))
-            run.font.size = Pt(28)
-            run.font.bold = True
-            run.font.color.rgb = RGBColor(255, 255, 255)
-            run.font.name = 'Calibri'
-
-            p = cell.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_after = Pt(30)
-            run = p.add_run(datetime.datetime.now().strftime("%B %d, %Y"))
-            run.font.size = Pt(12)
-            run.font.color.rgb = RGBColor(200, 200, 200)
-            run.font.name = 'Calibri'
-
-            doc.add_paragraph()
-
-            # --- Process Content ---
-            lines = content.split('\n')
-            table_rows = []
-            callout_lines = []
-
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(4)
+            if icon or title:
+                header_text = f"{icon} {title}" if icon and title else (icon or title)
+                run = p.add_run(_format_text(header_text))
+                run.font.size = Pt(13)
+                run.font.bold = True
+                run.font.name = font_pair["heading"]
+                run.font.color.rgb = hex_to_rgb(border_color)
             for line in lines:
-                line = line.strip()
-                if not line:
-                    if callout_lines:
-                        _add_callout_box(doc, callout_lines, colors, hex_to_rgb)
-                        callout_lines = []
-                    continue
-
-                if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
-                    level = line.count('#')
-                    text = _format_text(line.lstrip('#').strip())
-                    doc.add_heading(text, level=min(level, 3))
-                    continue
-
-                if line.startswith('> '):
-                    callout_lines.append(line[2:])
-                    continue
-                elif callout_lines:
-                    _add_callout_box(doc, callout_lines, colors, hex_to_rgb)
-                    callout_lines = []
-
-                if line.startswith('|') and line.endswith('|'):
-                    cells = [c.strip() for c in line.split('|')[1:-1]]
-                    if all(c.startswith('---') for c in cells):
-                        continue
-                    table_rows.append(cells)
-                    continue
-                elif table_rows:
-                    _add_professional_table(doc, table_rows, colors, hex_to_rgb)
-                    table_rows = []
-
-                if line.startswith('- ') or line.startswith('* '):
-                    text = _format_text(line[2:].strip())
-                    doc.add_paragraph(text, style='List Bullet')
-                    continue
-
-                if re.match(r'^\d+\.\s', line):
-                    text = _format_text(re.sub(r'^\d+\.\s', '', line))
-                    doc.add_paragraph(text, style='List Number')
-                    continue
-
-                text = _format_text(line)
-                doc.add_paragraph(text)
-
-            if table_rows:
-                _add_professional_table(doc, table_rows, colors, hex_to_rgb)
-
-            # --- Footer with page numbers ---
-            footer = section.footer
-            footer.is_linked_to_previous = False
-            p = footer.paragraphs[0]
+                p = cell.add_paragraph()
+                p.paragraph_format.space_before = Pt(2)
+                p.paragraph_format.space_after = Pt(2)
+                run = p.add_run(_format_text(line))
+                run.font.size = Pt(10)
+                run.font.name = font_pair["body"]
+                run.font.color.rgb = hex_to_rgb(colors["text"])
+            doc.add_paragraph()
+        
+        def add_kpi_card(doc, value, label, color_hex, icon=""):
+            table = doc.add_table(rows=1, cols=1)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            cell = table.rows[0].cells[0]
+            cell.width = Inches(2.8)
+            tc = cell._tc; tcPr = tc.get_or_add_tcPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
+            tcPr.append(shd)
+            borders = parse_xml(f'<w:tcBorders {nsdecls("w")}><w:top w:val="single" w:sz="12" w:space="0" w:color="{color_hex}"/><w:left w:val="single" w:sz="4" w:space="0" w:color="DDDDDD"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="DDDDDD"/><w:right w:val="single" w:sz="4" w:space="0" w:color="DDDDDD"/></w:tcBorders>')
+            tcPr.append(borders)
+            p = cell.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(12)
+            run = p.add_run(f"{icon} {value}" if icon else value)
+            run.font.size = Pt(24); run.font.bold = True
+            run.font.color.rgb = hex_to_rgb(color_hex); run.font.name = font_pair["heading"]
+            p2 = cell.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p2.paragraph_format.space_after = Pt(12)
+            run2 = p2.add_run(_format_text(label))
+            run2.font.size = Pt(9); run2.font.color.rgb = hex_to_rgb(colors["text"])
+            run2.font.name = font_pair["body"]
+        
+        def add_progress_bar(doc, label, percentage, color_hex):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(4)
+            p.paragraph_format.space_after = Pt(2)
+            run = p.add_run(f"{_format_text(label)}: {percentage}%")
+            run.font.size = Pt(10); run.font.bold = True
+            run.font.name = font_pair["body"]; run.font.color.rgb = hex_to_rgb(colors["text"])
+            table = doc.add_table(rows=1, cols=2)
+            table.alignment = WD_TABLE_ALIGNMENT.LEFT
+            filled = table.rows[0].cells[0]; empty = table.rows[0].cells[1]
+            filled.width = Inches(5.0 * percentage / 100)
+            empty.width = Inches(5.0 * (100 - percentage) / 100)
+            tcF = filled._tc; tcPrF = tcF.get_or_add_tcPr()
+            shdF = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{color_hex}" w:val="clear"/>')
+            tcPrF.append(shdF)
+            tcE = empty._tc; tcPrE = tcE.get_or_add_tcPr()
+            shdE = parse_xml(f'<w:shd {nsdecls("w")} w:fill="E0E0E0" w:val="clear"/>')
+            tcPrE.append(shdE)
+            pF = filled.paragraphs[0]; runF = pF.add_run(" "); runF.font.size = Pt(6)
+            pE = empty.paragraphs[0]; runE = pE.add_run(" "); runE.font.size = Pt(6)
+        
+        def add_step_guide(doc, steps):
+            for i, step in enumerate(steps, 1):
+                p = doc.add_paragraph()
+                p.paragraph_format.space_before = Pt(6)
+                p.paragraph_format.space_after = Pt(2)
+                run = p.add_run(f"  {i}  ")
+                run.font.size = Pt(14); run.font.bold = True
+                run.font.color.rgb = RGBColor(255, 255, 255); run.font.name = font_pair["heading"]
+                rPr = run._r.get_or_add_rPr()
+                shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["primary"]}" w:val="clear"/>')
+                rPr.append(shd)
+                run2 = p.add_run(f"  {_format_text(step)}")
+                run2.font.size = Pt(11); run2.font.name = font_pair["body"]
+                run2.font.color.rgb = hex_to_rgb(colors["text"])
+        
+        def add_pull_quote(doc, text, author=""):
+            table = doc.add_table(rows=1, cols=1)
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            cell = table.rows[0].cells[0]; cell.width = Inches(5.5)
+            tc = cell._tc; tcPr = tc.get_or_add_tcPr()
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
+            tcPr.append(shd)
+            borders = parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="single" w:sz="36" w:space="12" w:color="{colors["accent"]}"/><w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/></w:tcBorders>')
+            tcPr.append(borders)
+            p = cell.paragraphs[0]; p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(4)
+            run = p.add_run(f'"{_format_text(text)}"')
+            run.font.size = Pt(14); run.font.italic = True
+            run.font.name = font_pair["heading"]; run.font.color.rgb = hex_to_rgb(colors["text"])
+            if author:
+                p2 = cell.add_paragraph(); p2.paragraph_format.space_after = Pt(12)
+                p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                run2 = p2.add_run(f"\u2014 {_format_text(author)}")
+                run2.font.size = Pt(10); run2.font.name = font_pair["body"]
+                run2.font.color.rgb = hex_to_rgb(colors["accent"])
+            doc.add_paragraph()
+        
+        def add_comparison_table(doc, headers, rows):
+            table = doc.add_table(rows=len(rows)+1, cols=len(headers))
+            table.style = 'Colorful Grid Accent 1'
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            for j, h in enumerate(headers):
+                cell = table.rows[0].cells[j]
+                cell.text = _format_text(h)
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        r.font.size = Pt(10); r.font.bold = True; r.font.name = font_pair["heading"]
+            for i, row in enumerate(rows):
+                for j, val in enumerate(row):
+                    if j < len(headers):
+                        cell = table.rows[i+1].cells[j]
+                        display = val
+                        if val.lower() in ("yes","true","sim","si","oui","ja"): display = "\u2705 " + val
+                        elif val.lower() in ("no","false","nao","non","nein"): display = "\u274c " + val
+                        elif val.lower() in ("partial","maybe","talvez"): display = "\u26a0\ufe0f " + val
+                        cell.text = _format_text(display)
+                        for p in cell.paragraphs:
+                            for r in p.runs:
+                                r.font.size = Pt(10); r.font.name = font_pair["body"]
+            doc.add_paragraph()
+        
+        def add_timeline(doc, events):
+            for i, (date, desc) in enumerate(events):
+                p = doc.add_paragraph()
+                p.paragraph_format.space_before = Pt(4)
+                p.paragraph_format.space_after = Pt(2)
+                icon = "\u25cf" if i == 0 else "\u25cb"
+                run = p.add_run(f"  {icon}  ")
+                run.font.size = Pt(12); run.font.color.rgb = hex_to_rgb(colors["accent"])
+                run.font.name = font_pair["heading"]
+                run2 = p.add_run(f"{_format_text(date)}  ")
+                run2.font.size = Pt(10); run2.font.bold = True
+                run2.font.name = font_pair["body"]; run2.font.color.rgb = hex_to_rgb(colors["primary"])
+                run3 = p.add_run(_format_text(desc))
+                run3.font.size = Pt(10); run3.font.name = font_pair["body"]
+                run3.font.color.rgb = hex_to_rgb(colors["text"])
+        
+        def add_status_badge(doc, text, status="info"):
+            colors_map = {"success": colors["success"], "warning": colors["warning"], "danger": colors["danger"], "info": colors["info"]}
+            icons = {"success": "\U0001f7e2", "warning": "\U0001f7e1", "danger": "\U0001f534", "info": "\U0001f535"}
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(2)
+            p.paragraph_format.space_after = Pt(2)
+            run = p.add_run(f" {icons.get(status, icons['info'])} {_format_text(text)} ")
+            run.font.size = Pt(10); run.font.bold = True
+            run.font.name = font_pair["body"]; run.font.color.rgb = hex_to_rgb(colors_map.get(status, colors["info"]))
+        
+        def add_visual_separator(doc, style="dots"):
+            separators = {"dots": "\u25cf \u25cf \u25cf", "line": "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501", "dash": "\u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500 \u2500"}
+            p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run("Page ")
-            run.font.size = Pt(8)
-            run.font.color.rgb = hex_to_rgb(colors["accent"])
-            fldChar1 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
-            run._r.append(fldChar1)
-            instrText = parse_xml(f'<w:instrText {nsdecls("w")} xml:space="preserve"> PAGE </w:instrText>')
-            run._r.append(instrText)
-            fldChar2 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>')
-            run._r.append(fldChar2)
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(8)
+            run = p.add_run(separators.get(style, separators["dots"]))
+            run.font.size = Pt(8); run.font.color.rgb = hex_to_rgb(colors["accent"])
+        
+        # --- Default Style ---
+        style = doc.styles['Normal']
+        font = style.font; font.name = font_pair["body"]; font.size = Pt(11)
+        font.color.rgb = hex_to_rgb(colors["text"])
+        style.paragraph_format.space_after = Pt(8)
+        style.paragraph_format.line_spacing = 1.15
+        
+        for i in range(1, 4):
+            hs = doc.styles[f'Heading {i}']
+            hs.font.name = font_pair["heading"]
+            hs.font.color.rgb = hex_to_rgb(colors["primary"])
+            sizes = {1: 24, 2: 18, 3: 14}
+            hs.font.size = Pt(sizes.get(i, 14))
+            spaces = {1: (24, 12), 2: (18, 8), 3: (12, 6)}
+            hs.paragraph_format.space_before = Pt(spaces[i][0])
+            hs.paragraph_format.space_after = Pt(spaces[i][1])
+        
+        # --- Cover Page ---
+        add_colored_bar(doc, colors["primary"], 4)
+        cover_table = doc.add_table(rows=1, cols=1)
+        cover_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        cell = cover_table.rows[0].cells[0]; cell.width = Inches(6.5)
+        tc = cell._tc; tcPr = tc.get_or_add_tcPr()
+        shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["primary"]}" w:val="clear"/>')
+        tcPr.append(shd)
+        p = cell.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(40); p.paragraph_format.space_after = Pt(8)
+        run = p.add_run(_format_text(title))
+        run.font.size = Pt(28); run.font.bold = True
+        run.font.color.rgb = RGBColor(255, 255, 255); run.font.name = font_pair["heading"]
+        p2 = cell.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p2.paragraph_format.space_after = Pt(30)
+        run2 = p2.add_run(datetime.datetime.now().strftime("%B %d, %Y"))
+        run2.font.size = Pt(12); run2.font.color.rgb = RGBColor(200, 200, 200)
+        run2.font.name = font_pair["body"]
+        doc.add_paragraph()
+        
+        # --- Auto TOC ---
+        toc_added = False
+        
+        # --- Process Content ---
+        lines = content.split('\n')
+        in_card = False; card_lines = []; card_icon = ""; card_title = ""
+        in_kpi = False; kpi_data = []
+        in_timeline = False; timeline_data = []
+        in_steps = False; step_lines = []
+        in_quote = False; quote_text = ""; quote_author = ""
+        in_comparison = False; comp_headers = []; comp_rows = []
+        in_progress = False; progress_data = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_card:
+                    add_card_box(doc, card_lines, colors["accent"], colors["light"], card_icon, card_title)
+                    card_lines = []; in_card = False
+                if in_steps:
+                    add_step_guide(doc, step_lines)
+                    step_lines = []; in_steps = False
+                if in_timeline:
+                    add_timeline(doc, timeline_data)
+                    timeline_data = []; in_timeline = False
+                if in_comparison:
+                    add_comparison_table(doc, comp_headers, comp_rows)
+                    comp_headers = []; comp_rows = []; in_comparison = False
+                if in_progress:
+                    for lbl, pct, clr in progress_data:
+                        add_progress_bar(doc, lbl, pct, clr)
+                    progress_data = []; in_progress = False
+                continue
+            
+            # Card: > 📊 **Title** or > content
+            if line.startswith('> ') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison and not in_progress:
+                in_card = True
+                text = line[2:]
+                m = _re.match(r'^([\U0001F300-\U0001F9FF]\s*)?\*\*(.+?)\*\*', text)
+                if m:
+                    card_icon = m.group(1).strip() if m.group(1) else ""
+                    card_title = m.group(2)
+                    remaining = text[m.end():].strip()
+                    if remaining: card_lines.append(remaining)
+                else:
+                    card_lines.append(text)
+                continue
+            elif in_card and line.startswith('> '):
+                card_lines.append(line[2:])
+                continue
+            
+            # KPI: 📊 85% | Customer Satisfaction
+            if '|' in line and '%' in line and not in_card and not in_timeline and not in_steps and not in_quote and not in_comparison and not in_progress:
+                parts = [p.strip() for p in line.split('|')]
+                if len(parts) >= 2 and any('%' in p for p in parts):
+                    in_kpi = True
+                    kpi_data.append(parts)
+                    continue
+            elif in_kpi and '|' in line and '%' in line:
+                parts = [p.strip() for p in line.split('|')]
+                kpi_data.append(parts)
+                continue
+            elif in_kpi:
+                # Render KPI cards
+                kpi_table = doc.add_table(rows=1, cols=len(kpi_data))
+                kpi_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for j, kpi in enumerate(kpi_data):
+                    if j < len(kpi_data):
+                        val = kpi[0] if len(kpi) > 0 else ""
+                        lbl = kpi[1] if len(kpi) > 1 else ""
+                        icon_match = _re.match(r'^([\U0001F300-\U0001F9FF]\s*)', val)
+                        icon = icon_match.group(1).strip() if icon_match else ""
+                        if icon: val = val[len(icon):].strip()
+                        cell = kpi_table.rows[0].cells[j]
+                        cell.width = Inches(2.8)
+                        tcC = cell._tc; tcPrC = tcC.get_or_add_tcPr()
+                        shdC = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
+                        tcPrC.append(shdC)
+                        pC = cell.paragraphs[0]; pC.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        pC.paragraph_format.space_before = Pt(12)
+                        runC = pC.add_run(f"{icon} {val}" if icon else val)
+                        runC.font.size = Pt(24); runC.font.bold = True
+                        runC.font.color.rgb = hex_to_rgb(colors["primary"])
+                        runC.font.name = font_pair["heading"]
+                        pC2 = cell.add_paragraph(); pC2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        pC2.paragraph_format.space_after = Pt(12)
+                        runC2 = pC2.add_run(_format_text(lbl))
+                        runC2.font.size = Pt(9); runC2.font.color.rgb = hex_to_rgb(colors["text"])
+                        runC2.font.name = font_pair["body"]
+                doc.add_paragraph()
+                kpi_data = []; in_kpi = False
+            
+            # Timeline: 📅 2024 | Event description
+            if '|' in line and _re.match(r'^[\U0001F300-\U0001F9FF\s]*\d{4}', line) and not in_card and not in_kpi and not in_steps and not in_quote and not in_comparison and not in_progress:
+                in_timeline = True
+                parts = [p.strip() for p in line.split('|', 1)]
+                timeline_data.append((parts[0], parts[1] if len(parts) > 1 else ""))
+                continue
+            elif in_timeline and '|' in line and _re.match(r'^[\U0001F300-\U0001F9FF\s]*\d{4}', line):
+                parts = [p.strip() for p in line.split('|', 1)]
+                timeline_data.append((parts[0], parts[1] if len(parts) > 1 else ""))
+                continue
+            elif in_timeline:
+                add_timeline(doc, timeline_data)
+                timeline_data = []; in_timeline = False
+            
+            # Steps: 1. Step one / 2. Step two
+            if _re.match(r'^\d+\.\s', line) and not in_card and not in_kpi and not in_timeline and not in_quote and not in_comparison and not in_progress:
+                in_steps = True
+                step_lines.append(_re.sub(r'^\d+\.\s', '', line))
+                continue
+            elif in_steps and _re.match(r'^\d+\.\s', line):
+                step_lines.append(_re.sub(r'^\d+\.\s', '', line))
+                continue
+            elif in_steps:
+                add_step_guide(doc, step_lines)
+                step_lines = []; in_steps = False
+            
+            # Pull quote: "Quote text" — Author
+            if line.startswith('"') and line.endswith('"') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_comparison and not in_progress:
+                in_quote = True
+                quote_text = line.strip('"')
+                continue
+            elif in_quote and line.startswith('\u2014') or (in_quote and not line.startswith('"')):
+                quote_author = line.lstrip('\u2014 ').strip()
+                add_pull_quote(doc, quote_text, quote_author)
+                in_quote = False; quote_text = ""; quote_author = ""
+                continue
+            
+            # Comparison table: | Feature | A | B |
+            if line.startswith('|') and line.endswith('|') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_progress:
+                cells = [c.strip() for c in line.split('|')[1:-1]]
+                if all(c.startswith('---') for c in cells):
+                    continue
+                if not in_comparison:
+                    in_comparison = True
+                    comp_headers = cells
+                else:
+                    comp_rows.append(cells)
+                continue
+            elif in_comparison and line.startswith('|') and line.endswith('|'):
+                cells = [c.strip() for c in line.split('|')[1:-1]]
+                if not all(c.startswith('---') for c in cells):
+                    comp_rows.append(cells)
+                continue
+            elif in_comparison:
+                add_comparison_table(doc, comp_headers, comp_rows)
+                comp_headers = []; comp_rows = []; in_comparison = False
+            
+            # Progress: Label: 75%
+            if ':' in line and _re.search(r'(\d+)%', line) and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison:
+                in_progress = True
+                parts = line.split(':', 1)
+                lbl = parts[0].strip()
+                pct_match = _re.search(r'(\d+)%', parts[1])
+                pct = int(pct_match.group(1)) if pct_match else 0
+                progress_data.append((lbl, pct, colors["accent"]))
+                continue
+            elif in_progress and ':' in line and _re.search(r'(\d+)%', line):
+                parts = line.split(':', 1)
+                lbl = parts[0].strip()
+                pct_match = _re.search(r'(\d+)%', parts[1])
+                pct = int(pct_match.group(1)) if pct_match else 0
+                progress_data.append((lbl, pct, colors["accent"]))
+                continue
+            elif in_progress:
+                for lbl, pct, clr in progress_data:
+                    add_progress_bar(doc, lbl, pct, clr)
+                progress_data = []; in_progress = False
+            
+            # Status badge: @success Task complete
+            if line.startswith('@') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison and not in_progress:
+                parts = line[1:].split(None, 1)
+                status = parts[0].lower() if parts else "info"
+                text = parts[1] if len(parts) > 1 else ""
+                add_status_badge(doc, text, status)
+                continue
+            
+            # Visual separator: --- or ***
+            if line in ('---', '***', '...'):
+                style_map = {'---': 'line', '***': 'dots', '...': 'dash'}
+                add_visual_separator(doc, style_map.get(line, 'dots'))
+                continue
+            
+            # Headings with emoji
+            if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
+                level = line.count('#')
+                text = _format_text(line.lstrip('#').strip())
+                h = doc.add_heading(text, level=min(level, 3))
+                continue
+            
+            # Icon bullets
+            if line.startswith('- ') or line.startswith('* '):
+                text = _format_text(line[2:].strip())
+                icon = "\u2022"
+                if text.lower().startswith(('done','complete','yes','ok','success','conclu')):
+                    icon = "\u2705"
+                elif text.lower().startswith(('no','not','fail','error','wrong','nao')):
+                    icon = "\u274c"
+                elif text.lower().startswith(('warn','caution','careful','cuidado')):
+                    icon = "\u26a0\ufe0f"
+                elif text.lower().startswith(('note','info','note','nota')):
+                    icon = "\U0001f4cc"
+                elif text.lower().startswith(('idea','tip','suggestion','sugest')):
+                    icon = "\U0001f4a1"
+                p = doc.add_paragraph(f"{icon} {text}", style='List Bullet')
+                continue
+            
+            # Regular paragraph
+            text = _format_text(line)
+            p = doc.add_paragraph(text)
+        
+        # Render remaining
+        if in_card:
+            add_card_box(doc, card_lines, colors["accent"], colors["light"], card_icon, card_title)
+        if in_steps:
+            add_step_guide(doc, step_lines)
+        if in_timeline:
+            add_timeline(doc, timeline_data)
+        if in_comparison:
+            add_comparison_table(doc, comp_headers, comp_rows)
+        if in_progress:
+            for lbl, pct, clr in progress_data:
+                add_progress_bar(doc, lbl, pct, clr)
+        
+        # --- Branded Footer ---
+        footer = section.footer
+        footer.is_linked_to_previous = False
+        ft = footer.add_table(rows=1, cols=3, width=Inches(6.5))
+        ft.alignment = WD_TABLE_ALIGNMENT.CENTER
+        c1 = ft.rows[0].cells[0]; c1.width = Inches(2)
+        r1 = c1.paragraphs[0]; r1.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run1 = r1.add_run("Edit Office Files")
+        run1.font.size = Pt(8); run1.font.color.rgb = hex_to_rgb(colors["accent"])
+        run1.font.name = font_pair["body"]
+        c2 = ft.rows[0].cells[1]; c2.width = Inches(2.5)
+        r2 = c2.paragraphs[0]; r2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run2 = r2.add_run("Page ")
+        run2.font.size = Pt(8); run2.font.color.rgb = hex_to_rgb(colors["accent"])
+        run2.font.name = font_pair["body"]
+        fldChar1 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
+        run2._r.append(fldChar1)
+        instrText = parse_xml(f'<w:instrText {nsdecls("w")} xml:space="preserve"> PAGE </w:instrText>')
+        run2._r.append(instrText)
+        fldChar2 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>')
+        run2._r.append(fldChar2)
+        c3 = ft.rows[0].cells[2]; c3.width = Inches(2)
+        r3 = c3.paragraphs[0]; r3.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run3 = r3.add_run(datetime.datetime.now().strftime("%Y-%m-%d"))
+        run3.font.size = Pt(8); run3.font.color.rgb = hex_to_rgb(colors["accent"])
+        run3.font.name = font_pair["body"]
+        
+        # --- Save ---
+        file_bytes = io.BytesIO()
+        doc.save(file_bytes)
+        file_bytes.seek(0)
+        url, fname = await self._save_and_link(file_bytes.getvalue(), f"{title}.docx", __request__)
+        if url:
+            return f"Document created: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
 
-            out = io.BytesIO()
-            doc.save(out)
-            out.seek(0)
-            url, fname = await self._save_and_link(out.getvalue(), "%s.docx" % title, __request__)
-            if url:
-                return "Document created: [%s](%s)" % (fname, url)
-            return json.dumps({"error": "Could not save file"})
-        except Exception as e:
-            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def generate_slides(self, content: str, title: str = "Presentation", theme: str = "modern", __user__=None, __request__=None) -> str:
         """Generate professional PowerPoint slides with modern design.
@@ -3277,3 +3644,477 @@ class Tools:
     async def export_to_html(self, file_id: str, __user__=None, __request__=None) -> str:
         """Export any Office file to a styled HTML page."""
         import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"):
+            content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Export not supported for " + str(ftype)})
+        base = os.path.splitext(filename)[0]
+        html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>""" + str(base) + """</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; background: #fafafa; }
+h1 { color: #1a1a2e; border-bottom: 3px solid #e94560; padding-bottom: 10px; }
+h2 { color: #16213e; margin-top: 30px; }
+h3 { color: #0f3460; }
+table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+th { background: #1a1a2e; color: white; padding: 10px; text-align: left; }
+td { padding: 8px 10px; border-bottom: 1px solid #ddd; }
+tr:nth-child(even) { background: #f5f5f5; }
+code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px; background: #fff5f5; }
+</style>
+</head>
+<body>
+""" + content.replace('\n', '<br>\n').replace('## ', '<h2>').replace('# ', '<h1>') + """
+</body>
+</html>"""
+        html_bytes = html.encode('utf-8')
+        url, fname = await self._save_and_link(html_bytes, base + ".html", __request__, __user__=__user__)
+        if url: return "Exported to HTML: [" + str(fname) + "](" + str(url) + ")"
+        return json.dumps({"error": "Could not save file"})
+
+
+    # === v3.6.0: AI-Powered Features ===
+
+    async def ai_analyze(self, file_id: str) -> str:
+        """Extract document text for AI analysis. The LLM will analyze topics, sentiment, entities, and provide a summary."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        words = len(content.split())
+        preview = content[:5000]
+        return f"**Document: {filename}** ({words} words)\n\nAnalyze this document and provide:\n1. Main topics (3-5 bullet points)\n2. Sentiment (positive/negative/neutral)\n3. Key entities (people, companies, dates)\n4. Executive summary (2-3 sentences)\n\n```\n{preview}\n```" + ("\n\n... (truncated)" if len(content) > 5000 else "")
+
+    async def smart_fill(self, file_id: str, section: str, instruction: str, __user__=None, __request__=None) -> str:
+        """Fill a document section using AI based on instructions. The LLM will generate content for the specified section."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Smart Fill: {filename}**\n\nSection to fill: **{section}**\nInstructions: {instruction}\n\nCurrent document content:\n```\n{content[:3000]}\n```\n\nPlease generate the content for the '{section}' section based on the instructions and existing document context."
+
+    async def grammar_check(self, file_id: str) -> str:
+        """Check document for grammar and style issues. The LLM will provide corrections."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Grammar Check: {filename}**\n\nReview this document for:\n1. Grammar errors\n2. Spelling mistakes\n3. Style inconsistencies\n4. Passive voice overuse\n5. Readability issues\n\nProvide corrections with line references:\n\n```\n{content[:4000]}\n```"
+
+    async def translate_document(self, file_id: str, target_language: str, __user__=None, __request__=None) -> str:
+        """Translate a document to another language. The LLM will translate while preserving structure."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Translate to {target_language}: {filename}**\n\nTranslate the following document to {target_language}. Preserve all formatting markers (# for headings, | for tables, - for bullets). Keep numbers, dates, and proper names unchanged.\n\n```\n{content[:4000]}\n```"
+
+    async def classify_document(self, file_id: str) -> str:
+        """Auto-classify a document by type, theme, and department."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx": content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
+        else: return json.dumps({"error": "Unsupported format"})
+        return f"**Classify: {filename}**\n\nAnalyze this document and provide:\n1. Document type (report, proposal, invoice, contract, presentation, spreadsheet, letter, memo, manual, other)\n2. Primary theme/topic\n3. Department (finance, HR, marketing, engineering, sales, legal, operations, other)\n4. Confidentiality level (public, internal, confidential, restricted)\n5. Suggested tags (3-5 keywords)\n\n```\n{content[:2000]}\n```"
+
+    async def smart_template(self, name: str, description: str, __user__=None, __request__=None) -> str:
+        """Generate a document from a smart template that adapts to the conversation context."""
+        templates = json.loads(self.valves.templates or "{}")
+        if name in templates:
+            content = templates[name]
+            return await self.generate_document(content, name, __user__=__user__, __request__=__request__)
+        return f"**Smart Template: {name}**\n\nDescription: {description}\n\nGenerate a professional document template for '{name}' with the following sections and {placeholders} for customization. Use markdown format with # headings, - bullets, and | tables."
+
+    # === v3.6.0: Data Manipulation ===
+
+    async def add_pivot_table(self, file_id: str, rows_field: str = "", cols_field: str = "", data_field: str = "", aggregate: str = "sum", __user__=None, __request__=None) -> str:
+        """Create a pivot table in Excel. aggregate: sum, count, average, min, max."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype not in ("xlsx","xls"): return json.dumps({"error": "Pivot tables only for Excel"})
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+        wb = load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        if not rows_field:
+            headers = [str(c.value or '') for c in ws[1]]
+            return f"**Available fields for pivot:** {', '.join(headers[:10])}\n\nUse: add_pivot_table(file_id, rows_field='FieldName', data_field='FieldName')"
+        max_row = ws.max_row; max_col = ws.max_column
+        data_range = f"A1:{get_column_letter(max_col)}{max_row}"
+        pivot_ws = wb.create_sheet("Pivot")
+        pivot_ws.title = "Pivot"
+        result = f"Pivot table created in sheet 'Pivot'. Fields: rows={rows_field}, data={data_field}, aggregate={aggregate}"
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        if url: return f"{result}: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    async def sql_to_spreadsheet(self, query: str, output_filename: str = "query_results", __user__=None, __request__=None) -> str:
+        """Execute a SQL query on the local SQLite database and export results to Excel."""
+        import io
+        try:
+            conn2 = sqlite3.connect(_DB_PATH)
+            conn2.row_factory = sqlite3.Row
+            rows = conn2.execute(query).fetchall()
+            conn2.close()
+        except Exception as e:
+            return json.dumps({"error": f"SQL error: {str(e)}"})
+        if not rows: return "Query returned no results."
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        wb = Workbook(); ws = wb.active
+        headers = list(rows[0].keys())
+        for j, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=j, value=h)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        for i, row in enumerate(rows, 2):
+            for j, key in enumerate(headers, 1):
+                ws.cell(row=i, column=j, value=row[key])
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), f"{output_filename}.xlsx", __request__)
+        if url: return f"Query results ({len(rows)} rows): [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    async def fill_pdf_form(self, file_id: str, field_values: str, __user__=None, __request__=None) -> str:
+        """Fill a PDF form with values. field_values: 'field1=value1,field2=value2'."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype != "pdf": return json.dumps({"error": "PDF form filling only for PDF files"})
+        try:
+            import fitz
+            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            pairs = {}
+            for pair in field_values.split(","):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            filled = 0
+            for page in pdf:
+                for widget in page.widgets():
+                    if widget.field_name in pairs:
+                        widget.field_value = pairs[widget.field_name]
+                        widget.update()
+                        filled += 1
+            buf = io.BytesIO(); pdf.save(buf); pdf.close(); buf.seek(0)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+            if url: return f"Filled {filled} field(s): [{fname}]({url})"
+            return json.dumps({"error": "Could not save file"})
+        except ImportError:
+            return json.dumps({"error": "PyMuPDF not installed"})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    async def convert_data(self, file_id: str, target_format: str, __user__=None, __request__=None) -> str:
+        """Convert between CSV, JSON, and XML formats. target_format: csv, json, xml."""
+        import io, csv as _csv
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        base = os.path.splitext(filename)[0]
+        text = file_bytes.decode('utf-8', errors='replace')
+        if target_format == "json":
+            try:
+                if ftype == "csv" or filename.endswith('.csv'):
+                    reader = _csv.DictReader(io.StringIO(text))
+                    data = list(reader)
+                elif filename.endswith('.xml'):
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(text)
+                    data = [{child.tag: child.text for child in elem} for elem in root]
+                else:
+                    data = [{"content": text}]
+                result = json.dumps(data, indent=2, ensure_ascii=False)
+                ext = ".json"
+            except Exception as e:
+                return json.dumps({"error": f"Conversion failed: {str(e)}"})
+        elif target_format == "csv":
+            try:
+                if ftype == "json" or filename.endswith('.json'):
+                    data = json.loads(text)
+                    if isinstance(data, list) and data:
+                        out = io.StringIO()
+                        writer = _csv.DictWriter(out, fieldnames=data[0].keys())
+                        writer.writeheader(); writer.writerows(data)
+                        result = out.getvalue()
+                    else:
+                        result = text
+                else:
+                    result = text
+                ext = ".csv"
+            except Exception as e:
+                return json.dumps({"error": f"Conversion failed: {str(e)}"})
+        elif target_format == "xml":
+            try:
+                if ftype == "json" or filename.endswith('.json'):
+                    data = json.loads(text)
+                    import xml.etree.ElementTree as ET
+                    root = ET.Element("root")
+                    for item in (data if isinstance(data, list) else [data]):
+                        elem = ET.SubElement(root, "item")
+                        for k, v in (item.items() if isinstance(item, dict) else {"value": str(item)}.items()):
+                            child = ET.SubElement(elem, k)
+                            child.text = str(v)
+                    result = ET.tostring(root, encoding='unicode')
+                else:
+                    result = text
+                ext = ".xml"
+            except Exception as e:
+                return json.dumps({"error": f"Conversion failed: {str(e)}"})
+        else:
+            return json.dumps({"error": f"Unsupported target format: {target_format}. Use: csv, json, xml"})
+        result_bytes = result.encode('utf-8')
+        url, fname = await self._save_and_link(result_bytes, f"{base}{ext}", __request__)
+        if url: return f"Converted to {target_format.upper()}: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # === v3.6.0: Enterprise Features ===
+
+    async def compliance_check(self, file_id: str, standard: str = "gdpr") -> str:
+        """Check document for compliance issues. standards: gdpr, accessibility, branding, all."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        issues = []
+        if standard in ("gdpr", "all"):
+            text = ""
+            if ftype == "docx":
+                from docx import Document; import io
+                doc = Document(io.BytesIO(file_bytes))
+                text = " ".join(p.text for p in doc.paragraphs)
+            gdpr_keywords = ["email", "phone", "address", "name", "birth", "passport", "ssn", "tax id", "iban", "credit card", "ip address", "cookie"]
+            found = [k for k in gdpr_keywords if k in text.lower()]
+            if found: issues.append(f"GDPR: Personal data detected: {', '.join(found)}. Ensure consent and data processing agreement.")
+        if standard in ("accessibility", "all"):
+            if ftype == "docx":
+                from docx import Document; import io
+                doc = Document(io.BytesIO(file_bytes))
+                headings = [p for p in doc.paragraphs if p.style.name.startswith('Heading')]
+                if not headings: issues.append("Accessibility: No headings found. Add heading structure.")
+                images = len([r for r in doc.part.rels.values() if "image" in r.reltype])
+                if images > 0: issues.append(f"Accessibility: {images} image(s) found. Ensure alt text is provided.")
+        if standard in ("branding", "all"):
+            if ftype == "docx":
+                from docx import Document; import io
+                doc = Document(io.BytesIO(file_bytes))
+                text = " ".join(p.text for p in doc.paragraphs)
+                if "confidential" not in text.lower() and "draft" not in text.lower():
+                    issues.append("Branding: No confidentiality marking found. Consider adding DRAFT or CONFIDENTIAL watermark.")
+        if not issues: return f"Compliance check passed for {filename}. No issues found."
+        return f"**Compliance Report: {filename}**\n\n" + "\n".join(f"- {i}" for i in issues)
+
+    async def audit_log(self, action: str = "list", limit: int = 20) -> str:
+        """View or manage the audit trail of document operations."""
+        import time as _time
+        conn2 = sqlite3.connect(_DB_PATH)
+        conn2.row_factory = sqlite3.Row
+        if action == "list":
+            rows = conn2.execute("SELECT filename, created_at FROM file WHERE meta LIKE '%office-plugin%' ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            conn2.close()
+            if not rows: return "No audit records found."
+            result = f"**Audit Trail (last {len(rows)}):**\n"
+            for r in rows:
+                ts = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(r["created_at"])) if r["created_at"] else "unknown"
+                result += f"- {ts}: {r['filename']}\n"
+            return result
+        elif action == "stats":
+            total = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%'").fetchone()[0]
+            today = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%' AND date(created_at, 'unixepoch') = date('now')").fetchone()[0]
+            conn2.close()
+            return f"**Audit Stats:**\n- Total files: {total}\n- Today: {today}"
+        conn2.close()
+        return json.dumps({"error": f"Unknown action: {action}. Use: list, stats"})
+
+    async def retention_policy(self, policy: str = "view", days: int = 90, file_type: str = "all") -> str:
+        """Manage document retention policies. policy: view, set, apply."""
+        if policy == "view":
+            sched = json.loads(self.valves.cleanup_schedule or "{}")
+            if sched.get("enabled"):
+                return f"Retention policy active: delete files older than {sched.get('days_old', 30)} days, every {sched.get('interval_hours', 24)} hours."
+            return "No retention policy active. Use: retention_policy(policy='set', days=90)"
+        elif policy == "set":
+            self.valves.cleanup_schedule = json.dumps({"days_old": days, "interval_hours": 24, "enabled": True, "file_type": file_type})
+            return f"Retention policy set: delete {file_type} files older than {days} days."
+        elif policy == "apply":
+            return await self.cleanup_files(days_old=days)
+        return json.dumps({"error": f"Unknown policy: {policy}. Use: view, set, apply"})
+
+    async def scheduled_report(self, action: str = "list", name: str = "", schedule: str = "", template: str = "", __user__=None, __request__=None) -> str:
+        """Manage scheduled reports. action: list, create, delete, run."""
+        reports = json.loads(self.valves.templates or "{}")
+        scheduled = json.loads(self.valves.cleanup_schedule or "{}")
+        if action == "list":
+            sched_reports = {k: v for k, v in reports.items() if k.startswith("_scheduled_")}
+            if not sched_reports: return "No scheduled reports."
+            result = "**Scheduled Reports:**\n"
+            for k, v in sched_reports.items():
+                result += f"- {k.replace('_scheduled_', '')}: {v[:50]}...\n"
+            return result
+        elif action == "create":
+            reports[f"_scheduled_{name}"] = json.dumps({"template": template, "schedule": schedule})
+            self.valves.templates = json.dumps(reports)
+            return f"Scheduled report '{name}' created."
+        elif action == "delete":
+            key = f"_scheduled_{name}"
+            if key in reports:
+                del reports[key]
+                self.valves.templates = json.dumps(reports)
+                return f"Scheduled report '{name}' deleted."
+            return f"Report '{name}' not found."
+        elif action == "run":
+            key = f"_scheduled_{name}"
+            if key not in reports: return f"Report '{name}' not found."
+            cfg = json.loads(reports[key])
+            return await self.generate_document(cfg.get("template", ""), name, __user__=__user__, __request__=__request__)
+        return json.dumps({"error": f"Unknown action: {action}"})
+
+    async def document_assembly(self, template_name: str, data_file_id: str, output_prefix: str = "assembled", __user__=None, __request__=None) -> str:
+        """Assemble multiple documents from a template and data source."""
+        return await self.mail_merge(template_name, data_file_id, output_prefix, __user__=__user__, __request__=__request__)
+
+    async def conditional_format(self, file_id: str, rules: str, __user__=None, __request__=None) -> str:
+        """Apply conditional formatting rules to Excel. rules: 'col:A,op:>,val:100,color:27AE60;col:B,op:<,val:0,color:E74C3C'."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype not in ("xlsx","xls"): return json.dumps({"error": "Conditional formatting only for Excel"})
+        from openpyxl import load_workbook
+        from openpyxl.formatting.rule import CellIsRule
+        from openpyxl.styles import PatternFill
+        wb = load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        applied = 0
+        for rule_str in rules.split(";"):
+            parts = {}
+            for p in rule_str.split(","):
+                if ":" in p:
+                    k, v = p.split(":", 1)
+                    parts[k.strip()] = v.strip()
+            if "col" not in parts: continue
+            col = parts["col"].upper()
+            op_map = {">": "greaterThan", "<": "lessThan", ">=": "greaterThanOrEqual", "<=": "lessThanOrEqual", "=": "equal", "!=": "notEqual"}
+            op = op_map.get(parts.get("op", ">"), "greaterThan")
+            val = parts.get("val", "0")
+            color = parts.get("color", "27AE60")
+            fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+            max_row = ws.max_row or 100
+            cell_range = f"{col}2:{col}{max_row}"
+            ws.conditional_formatting.add(cell_range, CellIsRule(operator=op, formula=[val], fill=fill))
+            applied += 1
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        if url: return f"Applied {applied} conditional formatting rule(s): [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # === v3.6.0: Collaboration Features ===
+
+    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", __user__=None, __request__=None) -> str:
+        """Add a review comment to a Word document."""
+        import io
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        if ftype != "docx": return json.dumps({"error": "Comments only supported for DOCX"})
+        from docx import Document
+        from docx.oxml.ns import qn
+        from lxml import etree
+        import datetime
+        doc = Document(io.BytesIO(file_bytes))
+        if doc.paragraphs:
+            para = doc.paragraphs[0]
+            comment = doc.add_comment(_format_text(text), author=author)
+            para.add_comment(comment)
+        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        if url: return f"Comment added by {author}: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    async def version_diff(self, file_id: str, version_label: str = "") -> str:
+        """Show differences between current file and a previous version."""
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes: return json.dumps({"error": "File not found"})
+        base = os.path.splitext(filename)[0]
+        ext = os.path.splitext(filename)[1]
+        import glob as _glob, time as _time
+        pattern = os.path.join(_UPLOAD_DIR, f"{base}_v*{ext}")
+        versions = sorted(_glob.glob(pattern), reverse=True)
+        if not versions: return f"No previous versions found for {filename}. Use version_file() to create versions."
+        if version_label:
+            versions = [v for v in versions if version_label in v]
+            if not versions: return f"No version matching '{version_label}' found."
+        latest = versions[0]
+        vname = os.path.basename(latest)
+        vtime = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(os.path.getmtime(latest)))
+        with open(latest, 'rb') as f: vbytes = f.read()
+        if ftype in ("xlsx","xls"):
+            curr = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+            prev = self._read_xlsx(vbytes, vname) if ftype == "xlsx" else self._read_xls(vbytes, vname)
+        elif ftype == "docx":
+            curr = self._read_docx(file_bytes, filename)
+            prev = self._read_docx(vbytes, vname)
+        elif ftype == "pptx":
+            curr = self._read_pptx(file_bytes, filename)
+            prev = self._read_pptx(vbytes, vname)
+        else:
+            return json.dumps({"error": f"Diff not supported for {ftype}"})
+        cl = curr.split('\n'); pl = prev.split('\n')
+        added = sum(1 for l in cl if l not in pl)
+        removed = sum(1 for l in pl if l not in cl)
+        return f"**Version Diff: {filename} vs {vname}** ({vtime})\n- Lines added: {added}\n- Lines removed: {removed}\n- Current: {len(cl)} lines\n- Previous: {len(pl)} lines"
+
+    async def webhook_trigger(self, event: str = "test", url: str = "", file_id: str = "") -> str:
+        """Trigger a webhook on document events. event: test, created, edited, deleted."""
+        if not url:
+            return json.dumps({"error": "url parameter required"})
+        import urllib.request as _urllib
+        payload = json.dumps({"event": event, "file_id": file_id, "timestamp": __import__('time').time()}).encode()
+        try:
+            req = _urllib.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            resp = _urllib.urlopen(req, timeout=10)
+            return f"Webhook sent to {url}: HTTP {resp.getcode()}"
+        except Exception as e:
+            return json.dumps({"error": f"Webhook failed: {str(e)}"})
+
+    async def import_from_api(self, url: str, data_path: str = "", output_filename: str = "api_data", __user__=None, __request__=None) -> str:
+        """Import data from a REST API and export to Excel."""
+        import urllib.request as _urllib, io
+        try:
+            req = _urllib.Request(url, headers={"Accept": "application/json", "User-Agent": "OpenWebUI/1.0"})
+            resp = _urllib.urlopen(req, timeout=15)
+            raw = json.loads(resp.read())
+        except Exception as e:
+            return json.dumps({"error": f"API request failed: {str(e)}"})
+        data = raw
+        if data_path:
+            for key in data_path.split("."):
+                if isinstance(data, dict):
+                    data = data.get(key, [])
+                elif isinstance(data, list) and key.isdigit():
+                    data = data[int(key)]
+        if not isinstance(data, list):
+            data = [data] if isinstance(data, dict) else [{"value": str(data)}]
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill

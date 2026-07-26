@@ -8,6 +8,8 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.6.0** | AI analysis, smart fill, grammar check, translation, classification, smart templates, pivot tables, SQL→Excel, PDF forms, data conversion, compliance, audit log, retention, scheduled reports, document assembly, conditional formatting, comments, version diff, webhooks, API import |
+| **v3.5.0** | 18 visual improvements: emojis, cards, KPI dashboards, progress bars, timelines, pull quotes, comparison tables, step guides, status badges, visual separators, 10 color palettes, 4 typography presets |
 | **v3.4.0** | AI summarize, speaker notes, document stats, QR codes, bulk ops, file search, data validation, named ranges, slide transitions, HTML export |
 | **v3.3.0** | Document comparison, Markdown export, URL import, versioning, Google Drive, OCR, i18n |
 | **v3.2.0** | ODF write (.odt/.ods/.odp), format conversion, templates, mail merge, charts, watermark, password protection, preview, metadata, accessibility |
