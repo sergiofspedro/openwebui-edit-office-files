@@ -20,6 +20,77 @@ Now tool use Open WebUI API for file storage (`/api/v1/files/{id}/content`) inst
 ### Changed
 - Updated `.gitignore` to exclude generated Office files and compiled Python
 
+## [3.4.0] - 2026-07-26
+
+### Added
+- **AI Summarize** — `ai_summarize()` extracts document text for LLM summarization
+- **Speaker Notes** — `add_speaker_notes()` adds speaker notes to PowerPoint slides
+- **Document Stats** — `document_stats()` shows word count, reading time, complexity
+- **QR Codes** — `add_qr_code()` generates QR codes in DOCX/PPTX documents
+- **Bulk Folder Ops** — `bulk_folder_ops()` lists, deletes, and shows stats on all uploads
+- **File Search** — `file_search()` full-text search across all generated files
+- **Data Validation** — `add_data_validation()` adds dropdown lists and validation rules to Excel
+- **Named Ranges** — `add_named_range()` defines named ranges in Excel workbooks
+- **Slide Transitions** — `add_slide_transitions()` adds fade/push/wipe/split transitions to PPTX
+- **HTML Export** — `export_to_html()` exports any Office file to a styled HTML page
+
+## [3.3.0] - 2026-07-26
+
+### Added
+- **Document Comparison** — `compare_documents()` shows differences between two files
+- **Markdown Export** — `export_to_markdown()` converts any Office file to Markdown
+- **URL Import** — `import_from_url()` fetches web pages and converts to Word documents
+- **File Versioning** — `version_file()` saves timestamped copies before editing
+- **Google Drive** — `upload_to_drive()` uploads files to Google Drive
+- **OCR** — `ocr_extract()` extracts text from images in PDFs
+- **i18n** — `translate_errors()` sets error message language (en, pt, es, fr, de)
+
+## [3.2.0] - 2026-07-26
+
+### Added
+- **ODF Write** — `create_odf()` creates .odt, .ods, .odp files from scratch
+- **Format Conversion** — `convert_format()` converts between all Office formats
+- **Template System** — `save_template()`, `use_template()`, `list_templates()` for reusable templates
+- **Scheduled Cleanup** — `schedule_cleanup()` for automatic file cleanup
+- **Mail Merge** — `mail_merge()` generates personalized documents from template + data
+- **Charts** — `add_chart()` adds bar, line, pie, scatter charts to Excel
+- **Watermark** — `add_watermark()` adds diagonal watermarks to DOCX/PDF
+- **Password Protection** — `protect_file()` encrypts Excel and Word files
+- **File Preview** — `preview_file()` shows text preview before downloading
+- **Metadata Editing** — `edit_metadata()` edits author, title, subject, keywords
+- **Accessibility** — `check_accessibility()` and `add_alt_text()` for document accessibility
+- **Progress Indicators** — `_progress()` emits status updates for long operations
+
+### Changed
+- Tool now has 34 functions (up from 18)
+
+## [3.1.0] - 2026-07-25
+
+### Added
+- **LibreOffice ODF Read** — `.odt`, `.ods`, `.odp` read support via `odfpy`
+- **File Cleanup** — `cleanup_files(days_old=30)` removes old generated files
+- `odfpy` dependency
+
+### Fixed
+- `_get_owui_data_dir` NameError on import (moved before constants)
+- `_read_odf` error handling for invalid files
+- `_detect_type` for ODF formats
+
+## [3.0.0] - 2026-07-25
+
+### Added
+- **Native File API** — files saved to uploads dir, served via `/api/v1/files/{id}/content`
+- `base_url` Valve with auto-detection from headers/env
+- `pydantic` dependency
+
+### Changed
+- **Breaking:** Removed `export_dir` and `file_server_url` Valves
+- **Breaking:** Removed `_save_file_sync()` helper
+- `file_server.py` no longer required
+
+### Contributors
+- @skorphil — PR #1
+
 ## [2.4.0] - 2026-07-24
 
 ### Added
