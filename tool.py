@@ -542,6 +542,7 @@ class Tools:
         )
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
+        language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
         pass
 
     def __init__(self):
@@ -2816,3 +2817,201 @@ class Tools:
             await __event_emitter__({"type": "status", "data": {"description": f"{operation}: {current}/{total}", "done": current >= total}})
         except Exception:
             pass
+
+
+    # --- v3.3.0: Document Comparison ---
+    async def compare_documents(self, file_id_a: str, file_id_b: str) -> str:
+        """Compare two documents and show differences."""
+        a_bytes, a_name, a_type = self._resolve_file(file_id_a)
+        b_bytes, b_name, b_type = self._resolve_file(file_id_b)
+        if not a_bytes or not b_bytes:
+            return json.dumps({"error": "One or both files not found"})
+        
+        def get_text(ftype, fb, fn):
+            if ftype in ("xlsx","xls"):
+                return self._read_xlsx(fb, fn) if ftype == "xlsx" else self._read_xls(fb, fn)
+            elif ftype == "docx": return self._read_docx(fb, fn)
+            elif ftype == "pptx": return self._read_pptx(fb, fn)
+            elif ftype in ("odt","ods","odp"): return _read_odf(fb, fn)
+            return ""
+        
+        text_a = get_text(a_type, a_bytes, a_name)
+        text_b = get_text(b_type, b_bytes, b_name)
+        
+        lines_a = text_a.split('\n')
+        lines_b = text_b.split('\n')
+        
+        result = f"**Comparison: {a_name} vs {b_name}**\n\n"
+        added = 0; removed = 0; changed = 0
+        max_len = max(len(lines_a), len(lines_b))
+        
+        for i in range(max_len):
+            la = lines_a[i] if i < len(lines_a) else None
+            lb = lines_b[i] if i < len(lines_b) else None
+            if la is None:
+                result += f"+ L{i+1}: {lb}\n"; added += 1
+            elif lb is None:
+                result += f"- L{i+1}: {la}\n"; removed += 1
+            elif la != lb:
+                result += f"~ L{i+1}:\n  - {la}\n  + {lb}\n"; changed += 1
+        
+        result += f"\n**Summary:** {added} added, {removed} removed, {changed} changed"
+        return result
+
+    # --- v3.3.0: Export to Markdown ---
+    async def export_to_markdown(self, file_id: str, __user__=None, __request__=None) -> str:
+        """Export any Office file to Markdown format."""
+        import io
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        if ftype in ("xlsx","xls"):
+            content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
+        elif ftype == "docx":
+            content = self._read_docx(file_bytes, filename)
+        elif ftype == "pptx":
+            content = self._read_pptx(file_bytes, filename)
+        elif ftype in ("odt","ods","odp"):
+            content = _read_odf(file_bytes, filename)
+        else:
+            return json.dumps({"error": f"Export not supported for {ftype}"})
+        
+        base = os.path.splitext(filename)[0]
+        md_content = f"# {base}\n\n{content}"
+        md_bytes = md_content.encode('utf-8')
+        
+        url, fname = await self._save_and_link(md_bytes, f"{base}.md", __request__, __user__=__user__)
+        if url:
+            return f"Exported to Markdown: [{fname}]({url})"
+        return json.dumps({"error": "Could not save file"})
+
+    # --- v3.3.0: Import from URL ---
+    async def import_from_url(self, url: str, title: str = "Web Document", __user__=None, __request__=None) -> str:
+        """Fetch a web page and convert it to a Word document."""
+        try:
+            import urllib.request as _urllib
+            req = _urllib.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            resp = _urllib.urlopen(req, timeout=15)
+            html = resp.read().decode('utf-8', errors='replace')
+        except Exception as e:
+            return json.dumps({"error": f"Failed to fetch URL: {str(e)}"})
+        
+        # Simple HTML to text
+        import re as _re
+        text = _re.sub(r'<script[^>]*>.*?</script>', '', html, flags=_re.DOTALL|_re.IGNORECASE)
+        text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL|_re.IGNORECASE)
+        text = _re.sub(r'<[^>]+>', '\n', text)
+        text = _re.sub(r'\n\s*\n', '\n\n', text)
+        text = _re.sub(r'[ \t]+', ' ', text)
+        text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
+        
+        if not text:
+            return json.dumps({"error": "No text content extracted from URL"})
+        
+        return await self.generate_document(text[:50000], title, __user__=__user__, __request__=__request__)
+
+    # --- v3.3.0: File Versioning ---
+    async def version_file(self, file_id: str, label: str = "", __user__=None, __request__=None) -> str:
+        """Save a versioned copy of a file before editing."""
+        import time as _time
+        
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": f"File not found: {file_id}"})
+        
+        base, ext = os.path.splitext(filename)
+        ts = _time.strftime("%Y%m%d_%H%M%S")
+        label_str = f"_{label}" if label else ""
+        version_name = f"{base}_v{ts}{label_str}{ext}"
+        
+        url, fname = await self._save_and_link(file_bytes, version_name, __request__, __user__=__user__)
+        if url:
+            return f"Version saved: [{fname}]({url})"
+        return json.dumps({"error": "Could not save version"})
+
+    # --- v3.3.0: Cloud Storage (Google Drive) ---
+    async def upload_to_drive(self, file_id: str, folder_id: str = "root") -> str:
+        """Upload a file to Google Drive. Requires google-api-python-client and credentials."""
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaIoBaseUpload
+            import io as _io
+            
+            file_bytes, filename, ftype = self._resolve_file(file_id)
+            if not file_bytes:
+                return json.dumps({"error": f"File not found: {file_id}"})
+            
+            creds_path = os.environ.get("GOOGLE_CREDENTIALS", "")
+            if not creds_path or not os.path.exists(creds_path):
+                return json.dumps({"error": "GOOGLE_CREDENTIALS env var not set or file not found"})
+            
+            mime_map = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                       "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                       "pdf": "application/pdf"}
+            mime = mime_map.get(ftype, "application/octet-stream")
+            
+            creds = service_account.Credentials.from_service_account_file(creds_path, scopes=["https://www.googleapis.com/auth/drive.file"])
+            service = build("drive", "v3", credentials=creds)
+            
+            media = MediaIoBaseUpload(_io.BytesIO(file_bytes), mimetype=mime, resumable=True)
+            file_metadata = {"name": filename, "parents": [folder_id]}
+            drive_file = service.files().create(body=file_metadata, media_body=media, fields="id,webViewLink").execute()
+            
+            return f"Uploaded to Google Drive: {drive_file.get('webViewLink', drive_file.get('id'))}"
+        except ImportError:
+            return json.dumps({"error": "google-api-python-client not installed. pip install google-api-python-client google-auth"})
+        except Exception as e:
+            return json.dumps({"error": f"Drive upload failed: {str(e)}"})
+
+    # --- v3.3.0: OCR ---
+    async def ocr_extract(self, file_id: str, language: str = "eng") -> str:
+        """Extract text from images in a document using OCR. Requires pytesseract and Pillow."""
+        try:
+            import pytesseract
+            from PIL import Image
+            import io as _io
+            
+            file_bytes, filename, ftype = self._resolve_file(file_id)
+            if not file_bytes:
+                return json.dumps({"error": f"File not found: {file_id}"})
+            
+            if ftype == "pdf":
+                try:
+                    import fitz
+                    pdf = fitz.open(stream=file_bytes, filetype="pdf")
+                    results = []
+                    for i, page in enumerate(pdf):
+                        pix = page.get_pixmap(dpi=200)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        text = pytesseract.image_to_string(img, lang=language)
+                        if text.strip():
+                            results.append(f"--- Page {i+1} ---\n{text.strip()}")
+                    pdf.close()
+                    return "\n\n".join(results) if results else "No text found in PDF images"
+                except ImportError:
+                    return json.dumps({"error": "PyMuPDF not installed"})
+            else:
+                return json.dumps({"error": f"OCR only supported for PDF files. Got: {ftype}"})
+        except ImportError:
+            return json.dumps({"error": "pytesseract or Pillow not installed. pip install pytesseract Pillow"})
+        except Exception as e:
+            return json.dumps({"error": f"OCR failed: {str(e)}"})
+
+    # --- v3.3.0: i18n Error Messages ---
+    async def translate_errors(self, language: str = "en") -> str:
+        """Set the language for error messages. Supported: en, pt, es, fr, de."""
+        translations = {
+            "en": {"file_not_found": "File not found", "could_not_save": "Could not save file", "unsupported": "Unsupported format"},
+            "pt": {"file_not_found": "Ficheiro nao encontrado", "could_not_save": "Nao foi possivel guardar", "unsupported": "Formato nao suportado"},
+            "es": {"file_not_found": "Archivo no encontrado", "could_not_save": "No se pudo guardar", "unsupported": "Formato no soportado"},
+            "fr": {"file_not_found": "Fichier introuvable", "could_not_save": "Impossible d'enregistrer", "unsupported": "Format non pris en charge"},
+            "de": {"file_not_found": "Datei nicht gefunden", "could_not_save": "Konnte nicht gespeichert werden", "unsupported": "Nicht unterstutztes Format"},
+        }
+        if language not in translations:
+            return json.dumps({"error": f"Language '{language}' not supported. Available: {', '.join(translations.keys())}"})
+        self.valves.language = language
+        return f"Language set to {language}. Error messages will now appear in {language}."
