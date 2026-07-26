@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.0.0
+version: 3.1.1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -414,7 +414,7 @@ class Tools:
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
-    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None) -> tuple:
+    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None, __user__=None) -> tuple:
         """Save file to Open WebUI uploads dir, register in DB, return download URL."""
         import base64 as _b64
         import hashlib
@@ -444,6 +444,8 @@ class Tools:
             file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
             now = int(_time.time())
 
+            user_id = __user__.get("id", "") if __user__ else ""
+
             conn = sqlite3.connect(_DB_PATH)
             conn.execute(
                 """INSERT OR REPLACE INTO file
@@ -451,7 +453,7 @@ class Tools:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     file_id,
-                    "",
+                    user_id,
                     file_hash,
                     _encode_filename(filename),
                     os.path.join(_UPLOAD_DIR, file_id),
@@ -907,7 +909,7 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nAdded content to {file_type.upper()} file, preserving original formatting."
             return json.dumps({"error": "Could not save file"})
@@ -1073,7 +1075,7 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nReplaced '{find_text}' with '{replace_with}' in {count} place(s), preserving all formatting."
             return json.dumps({"error": "Could not save file"})
@@ -1206,7 +1208,7 @@ class Tools:
                 prs.save(out)
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nCreated new {ftype.upper()} file."
             return json.dumps({"error": "Could not save file"})
@@ -1325,7 +1327,7 @@ class Tools:
             doc.save(out)
             out.seek(0)
             fname = output_filename or f"{title.replace(' ', '_')}.docx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nProfessional document generated."
             return json.dumps({"error": "Could not save file"})
@@ -1641,7 +1643,7 @@ class Tools:
             prs.save(out)
             out.seek(0)
             fname = output_filename or "presentation.pptx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nPresentation with {len(slides_data)} slides."
             return json.dumps({"error": "Could not save file"})
@@ -1901,7 +1903,7 @@ class Tools:
             wb.save(out)
             out.seek(0)
             fname = output_filename or f"{title.replace(' ', '_')}.xlsx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nProfessional workbook with {len(sheets_spec)} sheets generated."
             return json.dumps({"error": "Could not save file"})
@@ -1970,7 +1972,7 @@ class Tools:
             out = io.BytesIO()
             doc.save(out)
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nTracked changes by '{author}':\n" + "\n".join(results)
             return json.dumps({"error": "Could not save file"})
@@ -2025,7 +2027,7 @@ class Tools:
             wb_out.save(out)
             out.seek(0)
             fname = output_filename or "merged_workbook.xlsx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nMerged {merged} sheets from {len(ids)} files."
             return json.dumps({"error": "Could not save file"})
@@ -2100,7 +2102,7 @@ class Tools:
             merger.close()
             out.seek(0)
             fname = output_filename or "merged.pdf"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nMerged {count} PDFs into one file."
             return json.dumps({"error": "Could not save file"})
@@ -2137,7 +2139,7 @@ class Tools:
                 sub.close()
                 out.seek(0)
                 part_name = f"part_{start+1}_{end}.pdf"
-                url, name = await self._save_and_link(out.read(), part_name, __request__)
+                url, name = await self._save_and_link(out.read(), part_name, __request__, __user__=__user__)
                 if url:
                     urls.append(f"[{name}]({url})")
             src.close()
@@ -2262,7 +2264,7 @@ class Tools:
             out = io.BytesIO()
             rdoc.save(out)
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\n{msg}."
             return json.dumps({"error": "Could not save file"})
