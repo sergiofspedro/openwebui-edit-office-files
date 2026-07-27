@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.7.2** | Bug fixes: Linux data directory detection fix (`~/.open-webui/data/`), improved DB path fallback — 71 functions total |
 | **v3.7.1** | Bug fixes: link rendering (blue + underline) in DOCX, variable shadowing fix — 71 functions total |
 | **v3.7.0** | Markdown rendering in DOCX (headings, bold, italic, code), heading case preservation, `raw_text` parameter for all generate/create functions — 71 functions total |
 | **v3.6.0** | AI analysis, smart fill, grammar check, translation, classification, smart templates, pivot tables, SQL→Excel, PDF forms, data conversion, compliance, audit log, retention, scheduled reports, document assembly, conditional formatting, comments, version diff, webhooks, API import |
@@ -113,6 +114,11 @@ All `generate_document`, `generate_slides`, `generate_spreadsheet`, `create_file
 
 - **`raw_text=True`** — skip all auto-formatting (sentence case, em dash replacement) and keep your text exactly as written
 - Existing document edits (`add_content`, `replace_text`) always preserve original formatting
+
+### Bug Fixes (v3.7.2)
+
+- **Linux data directory detection** — Fixed path detection for `~/.open-webui/data/` on Linux environments
+- **DB path fallback** — Improved database path resolution when `OPEN_WEBUI_DATA_DIR` is not set, ensuring correct fallback to default paths
 
 ### Bug Fixes (v3.7.1)
 
