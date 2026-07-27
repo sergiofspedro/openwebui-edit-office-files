@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.7.0** | Markdown rendering in DOCX (headings, bold, italic, code), heading case preservation, `raw_text` parameter for all generate/create functions — 71 functions total |
 | **v3.6.0** | AI analysis, smart fill, grammar check, translation, classification, smart templates, pivot tables, SQL→Excel, PDF forms, data conversion, compliance, audit log, retention, scheduled reports, document assembly, conditional formatting, comments, version diff, webhooks, API import |
 | **v3.5.0** | 18 visual improvements: emojis, cards, KPI dashboards, progress bars, timelines, pull quotes, comparison tables, step guides, status badges, visual separators, 10 color palettes, 4 typography presets |
 | **v3.4.0** | AI summarize, speaker notes, document stats, QR codes, bulk ops, file search, data validation, named ranges, slide transitions, HTML export |
@@ -25,7 +26,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 | 1 | `read_file` | .xlsx .xls .docx .pptx .odt .ods .odp | Read any Office file and return contents as structured JSON. Detects highlights, bold, italic in DOCX. LibreOffice ODF support. |
 | 2 | `add_content` | .xlsx .xls .docx .pptx | Add new content while preserving ALL original formatting. CSV rows for Excel, text for Word, slides for PowerPoint. |
 | 3 | `replace_text` | .xlsx .xls .docx .pptx | Find and replace text across the entire file preserving fonts, styles, and cell formatting. |
-| 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. |
+| 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. DOCX supports markdown rendering. |
 | 5 | `tracked_change` | .docx | Apply Word track changes (redlines) with custom author name. Supports replace, insert, and delete modes. |
 | 6 | `manage_revisions` | .docx | List all tracked changes, accept all, or reject all revisions in a Word document. |
 | 7 | `merge_pdfs` | .pdf | Merge multiple PDFs into one using PyMuPDF. |
@@ -69,6 +70,13 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 | 45 | `add_named_range` | .xlsx | Define named ranges in Excel workbooks. |
 | 46 | `add_slide_transitions` | .pptx | Add fade, push, wipe, split transitions to slides. |
 | 47 | `export_to_html` | All | Export any Office file to a styled HTML page. |
+| 48 | `generate_document` *(updated)* | .docx | Markdown rendering — headings, bold, italic, code now parse correctly |
+| 49 | `generate_slides` *(updated)* | .pptx | Now accepts `raw_text=True` to skip auto-formatting |
+| 50 | `generate_spreadsheet` *(updated)* | .xlsx | Now accepts `raw_text=True` to skip auto-formatting |
+| 51 | `create_file` *(updated)* | .docx | Markdown parsing for headings, bullets, inline formatting |
+| 52 | `create_odf` *(updated)* | .odt .ods .odp | Now accepts `raw_text=True` to skip auto-formatting |
+
+**Total: 71 functions (52 documented core functions + 19 internal helpers)**
 
 ### LibreOffice ODF Support (v3.1.0)
 
@@ -87,6 +95,24 @@ Manage storage with `cleanup_files(days_old=30)`:
 - Uses `source: "office-plugin"` metadata to identify generated files
 - Example: `cleanup_files(days_old=7)` — removes files older than 1 week
 
+### Markdown Rendering (v3.7.0)
+
+`create_file("docx", ...)` and all `generate_*` functions now parse markdown in text content:
+
+- **Headings** — `# H1`, `## H2`, `### H3` render as Word headings with **original capitalization preserved** (no more forced lower case)
+- **Bold** — `**text**` renders as bold
+- **Italic** — `*text*` renders as italic
+- **Inline code** — `` `code` `` renders as code-styled text
+- **Code blocks** — Triple-backtick blocks render as monospace paragraphs
+- **Bullet lists** — `- item` / `* item` render as bulleted lists
+
+### Formatting Control (v3.7.0)
+
+All `generate_document`, `generate_slides`, `generate_spreadsheet`, `create_file`, and `create_odf` now accept:
+
+- **`raw_text=True`** — skip all auto-formatting (sentence case, em dash replacement) and keep your text exactly as written
+- Existing document edits (`add_content`, `replace_text`) always preserve original formatting
+
 ### Text Formatting (v2.3.0)
 
 All generated documents (DOCX, PPTX, XLSX) are automatically formatted with:
@@ -94,6 +120,7 @@ All generated documents (DOCX, PPTX, XLSX) are automatically formatted with:
 - **Sentence case** — only first letter of each sentence is uppercase
 - **Acronym preservation** — API, PDF, HTML, CSS, JSON, SQL, etc. kept uppercase
 - **Excel formulas preserved** — values starting with `=` are not modified
+- **Use `raw_text=True`** to bypass all automatic formatting
 
 ### Track Changes (v1.2.0)
 
