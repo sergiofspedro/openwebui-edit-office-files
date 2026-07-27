@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.7.1
+version: 3.7.2
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -27,10 +27,16 @@ def _get_owui_data_dir() -> str:
     if data_dir:
         return data_dir
     home = os.path.expanduser("~")
-    if platform.system() == "Windows":
+    system = platform.system()
+    if system == "Windows":
         return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data")
-    else:
+    if system == "Darwin":
         return os.path.join(home, "Library", "Application Support", "open-webui", "data")
+    # Linux
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", "")
+    if xdg_data_home:
+        return os.path.join(xdg_data_home, "open-webui", "data")
+    return os.path.join(home, ".open-webui", "data")
 
 def _get_owui_uploads_dir() -> str:
     """Return the Open WebUI uploads directory for the current OS."""
@@ -38,26 +44,30 @@ def _get_owui_uploads_dir() -> str:
     if data_dir:
         return os.path.join(data_dir, "data", "uploads")
     home = os.path.expanduser("~")
-    if platform.system() == "Windows":
+    system = platform.system()
+    if system == "Windows":
         return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data", "uploads")
-    else:
+    if system == "Darwin":
         return os.path.join(home, "Library", "Application Support", "open-webui", "data", "uploads")
+    # Linux
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", "")
+    if xdg_data_home:
+        return os.path.join(xdg_data_home, "open-webui", "data", "uploads")
+    return os.path.join(home, ".open-webui", "data", "uploads")
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_DB_PATH = os.path.join(
-    os.environ.get("OPEN_WEBUI_DATA_DIR", ""),
-    "data", "webui.db",
-)
-if not os.path.isfile(_DB_PATH):
+_data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
+if _data_dir:
+    _DB_PATH = os.path.join(_data_dir, "data", "webui.db")
+else:
     _DB_PATH = os.path.join(_get_owui_data_dir(), "webui.db")
 
-_UPLOAD_DIR = os.path.join(
-    os.environ.get("OPEN_WEBUI_DATA_DIR", ""),
-    "data", "uploads",
-)
-if not os.path.isdir(_UPLOAD_DIR):
+_data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
+if _data_dir:
+    _UPLOAD_DIR = os.path.join(_data_dir, "data", "uploads")
+else:
     _UPLOAD_DIR = _get_owui_uploads_dir()
 
 _EXPORT_DIR = os.environ.get("OWUI_EXPORTS_DIR", os.path.join(os.path.expanduser("~"), "open-webui", "exports"))
