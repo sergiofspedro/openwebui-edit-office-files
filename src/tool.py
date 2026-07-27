@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.7.0
+version: 3.7.1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -1756,6 +1756,9 @@ class Tools:
                             run.font.bold = True
                         if fmt.get('italic'):
                             run.font.italic = True
+                        if fmt.get('link'):
+                            run.font.color.rgb = RGBColor(0x25, 0x63, 0xEB)
+                            run.font.underline = True
                 doc.save(out)
 
             elif ftype == "pptx":
@@ -1922,6 +1925,9 @@ class Tools:
                     if fmt.get('italic'):
                         run.font.italic = True
                     run.font.color.rgb = hex_to_rgb(colors["text"])
+                    if fmt.get('link'):
+                        run.font.color.rgb = hex_to_rgb("2563EB")
+                        run.font.underline = True
             doc.add_paragraph()
         
         def add_kpi_card(doc, value, label, color_hex, icon=""):
@@ -1959,6 +1965,9 @@ class Tools:
                 run.font.name = font_pair["body"]; run.font.color.rgb = hex_to_rgb(colors["text"])
                 if fmt.get('italic'):
                     run.font.italic = True
+                if fmt.get('link'):
+                    run.font.color.rgb = hex_to_rgb("2563EB")
+                    run.font.underline = True
                 if fmt.get('code'):
                     run.font.name = "Consolas"
                     run.font.size = Pt(9)
@@ -2010,6 +2019,9 @@ class Tools:
                     if fmt.get('italic'):
                         run.font.italic = True
                     run.font.color.rgb = hex_to_rgb(colors["text"])
+                    if fmt.get('link'):
+                        run.font.color.rgb = hex_to_rgb("2563EB")
+                        run.font.underline = True
         
         def add_pull_quote(doc, text, author=""):
             table = doc.add_table(rows=1, cols=1)
@@ -2037,6 +2049,9 @@ class Tools:
                 run.font.color.rgb = hex_to_rgb(colors["text"])
                 if fmt.get('bold'):
                     run.font.bold = True
+                if fmt.get('link'):
+                    run.font.color.rgb = hex_to_rgb("2563EB")
+                    run.font.underline = True
                 if fmt.get('code'):
                     run.font.name = "Consolas"
                     run.font.size = Pt(9)
@@ -2062,6 +2077,9 @@ class Tools:
                         run.font.bold = True
                     if fmt.get('italic'):
                         run.font.italic = True
+                    if fmt.get('link'):
+                        run.font.color.rgb = hex_to_rgb("2563EB")
+                        run.font.underline = True
                     if fmt.get('code'):
                         run.font.name = "Consolas"
                         run.font.size = Pt(9)
@@ -2115,6 +2133,9 @@ class Tools:
                     if fmt.get('code'):
                         run.font.name = "Consolas"
                         run.font.size = Pt(9)
+                    if fmt.get('link'):
+                        run.font.color.rgb = hex_to_rgb("2563EB")
+                        run.font.underline = True
                 run_sep = p.add_run("  ")
                 run_sep.font.size = Pt(10)
                 run_sep.font.name = font_pair["body"]
@@ -2133,6 +2154,9 @@ class Tools:
                     if fmt.get('code'):
                         run.font.name = "Consolas"
                         run.font.size = Pt(9)
+                    if fmt.get('link'):
+                        run.font.color.rgb = hex_to_rgb("2563EB")
+                        run.font.underline = True
         
         def add_status_badge(doc, text, status="info"):
             colors_map = {"success": colors["success"], "warning": colors["warning"], "danger": colors["danger"], "info": colors["info"]}
@@ -2155,6 +2179,9 @@ class Tools:
                 run.font.name = font_pair["body"]; run.font.color.rgb = badge_color
                 if fmt.get('italic'):
                     run.font.italic = True
+                if fmt.get('link'):
+                    run.font.color.rgb = hex_to_rgb("2563EB")
+                    run.font.underline = True
                 if fmt.get('code'):
                     run.font.name = "Consolas"
                     run.font.size = Pt(9)
@@ -2191,6 +2218,9 @@ class Tools:
                         run.font.color.rgb = hex_to_rgb(color)
                     else:
                         run.font.color.rgb = color
+                if fmt.get('link'):
+                    run.font.color.rgb = hex_to_rgb("2563EB")
+                    run.font.underline = True
             return p
         
         # --- Default Style ---
@@ -2449,8 +2479,8 @@ class Tools:
             
             # Icon bullets
             if line.startswith('- ') or line.startswith('* '):
-                raw_text = line[2:].strip()
-                text = _format_text(raw_text, mode=fmt_mode)
+                bullet_text = line[2:].strip()
+                text = _format_text(bullet_text, mode=fmt_mode)
                 icon = "\u2022"
                 if text.lower().startswith(('done','complete','yes','ok','success','conclu')):
                     icon = "\u2705"
