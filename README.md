@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.7.1** | Bug fixes: link rendering (blue + underline) in DOCX, variable shadowing fix — 71 functions total |
 | **v3.7.0** | Markdown rendering in DOCX (headings, bold, italic, code), heading case preservation, `raw_text` parameter for all generate/create functions — 71 functions total |
 | **v3.6.0** | AI analysis, smart fill, grammar check, translation, classification, smart templates, pivot tables, SQL→Excel, PDF forms, data conversion, compliance, audit log, retention, scheduled reports, document assembly, conditional formatting, comments, version diff, webhooks, API import |
 | **v3.5.0** | 18 visual improvements: emojis, cards, KPI dashboards, progress bars, timelines, pull quotes, comparison tables, step guides, status badges, visual separators, 10 color palettes, 4 typography presets |
@@ -112,6 +113,11 @@ All `generate_document`, `generate_slides`, `generate_spreadsheet`, `create_file
 
 - **`raw_text=True`** — skip all auto-formatting (sentence case, em dash replacement) and keep your text exactly as written
 - Existing document edits (`add_content`, `replace_text`) always preserve original formatting
+
+### Bug Fixes (v3.7.1)
+
+- **Link rendering** — Hyperlinks in DOCX files now render with proper blue color and underline styling
+- **Variable shadowing** — Fixed variable shadowing conflict that could cause unexpected behavior in document processing
 
 ### Text Formatting (v2.3.0)
 
