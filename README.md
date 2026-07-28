@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.9.0** | `template_file_id` now works for all 6 creatable formats (docx, pptx, odt, ods, odp — not just xlsx). Fixed ~19 real bugs, including 27 functions that were guaranteed to crash on first use (`_save_and_link`/`_read_xxx` issues), `create_odf(format="odp")` being completely broken, and merged-cell crashes. Added a `debug_errors` valve and response caps/truncation to keep normal-operation output shorter. Removed the unmaintained `src/` module split — `tool.py` is now the single source of truth. See CHANGELOG.md for the full list. |
 | **v3.8.0** | `create_file` can now match an existing file's formatting: pass `template_file_id` (xlsx only for now) to reuse its fonts, fills, borders, number formats, merged cells, and column widths in the new file instead of a blank default style. Optional `template_header_row`/`template_data_row` for templates where row 1/2 aren't the real header/data rows. |
 | **v3.7.2** | Bug fixes: Linux data directory detection fix (`~/.open-webui/data/`), improved DB path fallback — 71 functions total |
 | **v3.7.1** | Bug fixes: link rendering (blue + underline) in DOCX, variable shadowing fix — 71 functions total |
@@ -29,7 +30,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 | 1 | `read_file` | .xlsx .xls .docx .pptx .odt .ods .odp | Read any Office file and return contents as structured JSON. Detects highlights, bold, italic in DOCX. LibreOffice ODF support. |
 | 2 | `add_content` | .xlsx .xls .docx .pptx | Add new content while preserving ALL original formatting. CSV rows for Excel, text for Word, slides for PowerPoint. |
 | 3 | `replace_text` | .xlsx .xls .docx .pptx | Find and replace text across the entire file preserving fonts, styles, and cell formatting. |
-| 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. DOCX supports markdown rendering. Optional `template_file_id` (xlsx only) matches an existing file's formatting instead of using default styling. |
+| 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. DOCX supports markdown rendering. Optional `template_file_id` matches an existing file's formatting (fonts/styles/theme; xlsx also copies per-column styles and merged cells) instead of using default styling. |
 | 5 | `tracked_change` | .docx | Apply Word track changes (redlines) with custom author name. Supports replace, insert, and delete modes. |
 | 6 | `manage_revisions` | .docx | List all tracked changes, accept all, or reject all revisions in a Word document. |
 | 7 | `merge_pdfs` | .pdf | Merge multiple PDFs into one using PyMuPDF. |
@@ -42,7 +43,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 | 14 | `generate_slides` | .pptx | Generate PowerPoint presentations with 13 layouts, 5 chart types, 6 themes. |
 | 15 | `generate_spreadsheet` | .xlsx | Generate Excel workbooks with tables, formulas, conditional formatting, multi-sheet. |
 | 16 | `cleanup_files` | - | Remove generated Office files older than N days from storage and database. Default 30 days. |
-| 17 | `create_odf` | .odt .ods .odp | Create new LibreOffice/OpenOffice files from scratch. |
+| 17 | `create_odf` | .odt .ods .odp | Create new LibreOffice/OpenOffice files from scratch. Optional `template_file_id` reuses an existing ODF file's styles (document/style-level, plus per-column cell styles for .ods). |
 | 18 | `convert_format` | All | Convert between formats (docx↔odt, xlsx↔ods, pptx↔odp). |
 | 19 | `save_template` | - | Save document templates with {placeholders} for reuse. |
 | 20 | `use_template` | .docx | Generate a document from a saved template. |
@@ -279,14 +280,25 @@ ProxyPreserveHost On
 
 Without this header, download links will use `localhost:3000` and won't work from other machines.
 
+## Other Valves
+- `debug_errors` (default `false`) — include the full Python traceback in error responses.
+  Leave off for normal use; turn on when debugging a specific failure.
+- `templates` / `cleanup_schedule` / `language` — see `save_template`/`schedule_cleanup`/
+  `translate_errors` above.
+
 ## Dependencies
 - `openpyxl` — Excel .xlsx read/write
 - `python-docx` — Word .docx read/write
 - `python-pptx` — PowerPoint .pptx read/write
 - `xlrd` — Legacy Excel .xls read
 - `docx-revisions` — Word track changes (redlines)
-- `odfpy` — LibreOffice ODF read (.odt, .ods, .odp)
+- `odfpy` — LibreOffice ODF read/write (.odt, .ods, .odp)
 - `lxml` — XML processing (dependency of docx-revisions)
+- `PyMuPDF` — PDF merge/split
+- `Pillow` — image handling (OCR, QR codes, images in documents)
+- `pytesseract` — OCR text extraction (requires the `tesseract` binary on the host)
+- `qrcode` — QR code generation
+- `google-api-python-client`, `google-auth` — Google Drive import
 
 ## License
 MIT
