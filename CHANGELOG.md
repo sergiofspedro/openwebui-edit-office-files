@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-07-28
+
+### Added
+- `create_file` (.xlsx) now accepts an optional `template_file_id`: instead of always creating a
+  blank workbook, it loads the referenced file and copies its fonts, fills, borders, number
+  formats, merged cell ranges, and column widths onto the new file. The template file itself is
+  never modified. Fixes new xlsx files losing all formatting when a user attaches a reference
+  file and expects the output to match it.
+- `template_header_row` / `template_data_row` (default 1 / 2) let you point at which template
+  rows to copy style from, for templates where row 1/2 aren't a plain header+data table (e.g. a
+  title bar or metadata row) — using the wrong row can otherwise carry over a misleading
+  number_format (e.g. a date format landing on a plain number).
+- `template_file_id` is not yet supported for .docx/.pptx or `create_odf` (.odt/.ods/.odp) —
+  calling with a non-xlsx type now returns a clear error instead of silently ignoring it.
+
 ### Added
 - Added support for VPS / server installations: 
 Now tool use Open WebUI API for file storage (`/api/v1/files/{id}/content`) instead of local export directory + custom HTTP file server. 

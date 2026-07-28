@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.8.0** | `create_file` can now match an existing file's formatting: pass `template_file_id` (xlsx only for now) to reuse its fonts, fills, borders, number formats, merged cells, and column widths in the new file instead of a blank default style. Optional `template_header_row`/`template_data_row` for templates where row 1/2 aren't the real header/data rows. |
 | **v3.7.2** | Bug fixes: Linux data directory detection fix (`~/.open-webui/data/`), improved DB path fallback — 71 functions total |
 | **v3.7.1** | Bug fixes: link rendering (blue + underline) in DOCX, variable shadowing fix — 71 functions total |
 | **v3.7.0** | Markdown rendering in DOCX (headings, bold, italic, code), heading case preservation, `raw_text` parameter for all generate/create functions — 71 functions total |
@@ -28,7 +29,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 | 1 | `read_file` | .xlsx .xls .docx .pptx .odt .ods .odp | Read any Office file and return contents as structured JSON. Detects highlights, bold, italic in DOCX. LibreOffice ODF support. |
 | 2 | `add_content` | .xlsx .xls .docx .pptx | Add new content while preserving ALL original formatting. CSV rows for Excel, text for Word, slides for PowerPoint. |
 | 3 | `replace_text` | .xlsx .xls .docx .pptx | Find and replace text across the entire file preserving fonts, styles, and cell formatting. |
-| 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. DOCX supports markdown rendering. |
+| 4 | `create_file` | .xlsx .docx .pptx | Create a brand new Office file from scratch with professional styling. DOCX supports markdown rendering. Optional `template_file_id` (xlsx only) matches an existing file's formatting instead of using default styling. |
 | 5 | `tracked_change` | .docx | Apply Word track changes (redlines) with custom author name. Supports replace, insert, and delete modes. |
 | 6 | `manage_revisions` | .docx | List all tracked changes, accept all, or reject all revisions in a Word document. |
 | 7 | `merge_pdfs` | .pdf | Merge multiple PDFs into one using PyMuPDF. |

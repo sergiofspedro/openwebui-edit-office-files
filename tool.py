@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.7.2
+version: 3.8.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -1641,10 +1641,13 @@ class Tools:
         content: str,
         output_filename: str = "",
         raw_text: bool = False,
+        template_file_id: str = "",
+        template_header_row: int = 1,
+        template_data_row: int = 2,
         __user__=None,
         __request__=None,
     ) -> str:
-        """Create a new Office file from scratch.
+        """Create a new Office file from scratch, optionally matching an existing file's formatting.
 
         For xlsx: content is CSV with headers on first line.
         For docx: supports markdown formatting — headings (#, ##, ###), bullets (-, *),
@@ -1656,6 +1659,18 @@ class Tools:
             content: Content specification
             output_filename: Output filename
             raw_text: If True, skip text formatting
+            template_file_id: Optional file_id of an existing file whose formatting/styles
+                should be reused for the new file (fonts, fills, borders, number formats,
+                merged cells, column widths). The template itself is never modified.
+                Currently only supported for file_type='xlsx'.
+            template_header_row: For xlsx templates, the row whose per-column style is copied
+                onto the new file's header row (default 1). Only the FIRST row of the new file
+                is ever written to — this just controls which template row's styling it borrows.
+                Change this if the template's row 1 isn't a table header (e.g. it's a title bar).
+            template_data_row: For xlsx templates, the row whose per-column style is copied onto
+                the new file's data rows (default 2). Change this if the template's row 2 isn't
+                a real data row (e.g. it's a metadata/info row) — using the wrong row can carry
+                over a misleading number_format (like a date format applied to a plain number).
         """
         fmt_mode = "preserve" if raw_text else "format"
         try:
@@ -1663,32 +1678,99 @@ class Tools:
             if ftype not in ("xlsx", "docx", "pptx"):
                 return json.dumps({"error": f"Unsupported type: {file_type}. Use xlsx, docx, or pptx."})
 
+            if template_file_id and ftype != "xlsx":
+                return json.dumps({
+                    "error": f"template_file_id is not yet supported for {ftype}. "
+                             "It currently works for xlsx only."
+                })
+            if (template_header_row != 1 or template_data_row != 2) and not template_file_id:
+                return json.dumps({
+                    "error": "template_header_row/template_data_row require template_file_id."
+                })
+
             out_name = output_filename or f"document.{ftype}"
             out = io.BytesIO()
 
             if ftype == "xlsx":
                 import openpyxl
                 from openpyxl.styles import Font, PatternFill, Alignment
-                wb = openpyxl.Workbook()
-                ws = wb.active
+
+                template_bytes = None
+                if template_file_id:
+                    template_bytes = _read_file_bytes(template_file_id)
+                    if template_bytes is None:
+                        return json.dumps({"error": f"Could not read template file {template_file_id}"})
+
+                header_ref = {}
+                data_ref = {}
+                if template_bytes:
+                    wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
+                    ws = wb.active
+
+                    # Reference styles: header row from template_header_row (default: template's
+                    # row 1), data rows from template_data_row (default: template's row 2).
+                    # Defaults suit a simple flat table; override them for templates where those
+                    # rows aren't actually the header/data rows (e.g. a title bar or info row).
+                    if ws.max_row and ws.max_row >= template_header_row:
+                        for cell in ws[template_header_row]:
+                            if cell.has_style:
+                                header_ref[cell.column] = {
+                                    "font": copy(cell.font),
+                                    "fill": copy(cell.fill),
+                                    "border": copy(cell.border),
+                                    "alignment": copy(cell.alignment),
+                                    "number_format": cell.number_format,
+                                }
+                    if ws.max_row and ws.max_row >= template_data_row:
+                        for cell in ws[template_data_row]:
+                            if cell.has_style:
+                                data_ref[cell.column] = {
+                                    "font": copy(cell.font),
+                                    "fill": copy(cell.fill),
+                                    "border": copy(cell.border),
+                                    "alignment": copy(cell.alignment),
+                                    "number_format": cell.number_format,
+                                }
+                    if not data_ref:
+                        data_ref = header_ref
+                else:
+                    wb = openpyxl.Workbook()
+                    ws = wb.active
 
                 import csv as _csv_mod
                 reader = _csv_mod.reader(io.StringIO(content))
                 rows = list(reader)
 
                 if rows:
+                    from openpyxl.cell.cell import MergedCell
+
                     # First row = headers (styled)
                     for j, h in enumerate(rows[0], 1):
-                        c = ws.cell(row=1, column=j, value=h.strip())
-                        c.font = Font(bold=True, color="FFFFFF", size=11)
-                        c.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-                        c.alignment = Alignment(horizontal="center")
+                        c = ws.cell(row=1, column=j)
+                        if isinstance(c, MergedCell):
+                            continue  # non-top-left cell of a merged range in the template, skip
+                        c.value = h.strip()
+                        if j in header_ref:
+                            try:
+                                c.font = copy(header_ref[j]["font"])
+                                c.fill = copy(header_ref[j]["fill"])
+                                c.border = copy(header_ref[j]["border"])
+                                c.alignment = copy(header_ref[j]["alignment"])
+                                c.number_format = header_ref[j]["number_format"]
+                            except Exception:
+                                pass
+                        else:
+                            c.font = Font(bold=True, color="FFFFFF", size=11)
+                            c.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                            c.alignment = Alignment(horizontal="center")
 
                     # Data rows
                     for i, rd in enumerate(rows[1:], 2):
                         for j, v in enumerate(rd, 1):
                             v = v.strip()
                             c = ws.cell(row=i, column=j)
+                            if isinstance(c, MergedCell):
+                                continue  # non-top-left cell of a merged range in the template, skip
                             if v == '':
                                 c.value = None
                             else:
@@ -1704,14 +1786,25 @@ class Tools:
                                             c.value = False
                                         else:
                                             c.value = v
-                            c.alignment = Alignment(
-                                horizontal="center" if isinstance(c.value, (int, float)) else "left"
-                            )
+                            if j in data_ref:
+                                try:
+                                    c.font = copy(data_ref[j]["font"])
+                                    c.fill = copy(data_ref[j]["fill"])
+                                    c.border = copy(data_ref[j]["border"])
+                                    c.alignment = copy(data_ref[j]["alignment"])
+                                    c.number_format = data_ref[j]["number_format"]
+                                except Exception:
+                                    pass
+                            else:
+                                c.alignment = Alignment(
+                                    horizontal="center" if isinstance(c.value, (int, float)) else "left"
+                                )
 
-                    # Auto-fit columns
-                    for col in ws.columns:
-                        mx = max((len(str(c.value or "")) for c in col), default=5)
-                        ws.column_dimensions[col[0].column_letter].width = min(mx + 3, 50)
+                    # Auto-fit columns only when there's no template to preserve tuned widths from
+                    if not template_bytes:
+                        for col in ws.columns:
+                            mx = max((len(str(c.value or "")) for c in col), default=5)
+                            ws.column_dimensions[col[0].column_letter].width = min(mx + 3, 50)
 
                 wb.save(out)
                 wb.close()
