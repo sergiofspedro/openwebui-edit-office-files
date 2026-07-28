@@ -94,14 +94,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downloaded by the user) pretty-printed, since that's genuinely human-facing.
 
 ### Removed
-- Deleted `build.py` and the entire `src/` module split (`00_header.py`, `01_helpers.py`
-  through `13_advanced.py`, `src/tool.py`). Two separate split schemes were attempted across
-  this repo's history and both silently rotted out of sync with the real `tool.py` — `src/
-  00_header.py` was ~700 lines stale (missing the entire v3.5–3.7.2 feature set), `src/
+- Deleted `build.py` and the fragmented `src/` module split (`00_header.py`, `01_helpers.py`
+  through `13_advanced.py`). Two separate multi-file split schemes were attempted across this
+  repo's history and both silently rotted out of sync with the real `tool.py` — `src/
+  00_header.py` was ~700 lines stale (missing the entire v3.5–3.7.2 feature set), and `src/
   01_helpers.py` through `13_advanced.py` were fully-dead duplicates from an abandoned earlier
-  scheme, and `build.py` itself had two independent bugs (wrong output path, and a glob that
-  would concatenate the dead fragments into a corrupted file). Root `tool.py` is now the only
-  source of truth — no build step, no split to keep in sync.
+  scheme. `src/tool.py` is kept as a single-file mirror of the real `tool.py` (updated in the
+  same commit whenever `tool.py` changes) — no fragmented split, no build step, no risk of
+  the two drifting apart piece by piece the way the old scheme did.
 
 ## [3.8.0] - 2026-07-28
 

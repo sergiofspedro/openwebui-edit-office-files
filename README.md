@@ -188,13 +188,18 @@ Search for "Edit Office Files" in the Open WebUI Community tools.
 1. Download `tool.py` from this repo
 2. In Open WebUI: Workspace > Tools > New Tool
 3. Paste the code and save
-4. Install dependencies:
+4. Install dependencies (see [Dependencies](#dependencies) below):
 ```bash
-pip install openpyxl python-docx python-pptx xlrd docx-revisions odfpy pydantic
+pip install openpyxl python-docx python-pptx xlrd docx-revisions lxml odfpy PyMuPDF Pillow pytesseract qrcode google-api-python-client google-auth
 ```
 
 ### Method 3: Batch Install
 Use the Batch Install Plugins tool in Open WebUI pointing to this repo.
+
+### Development
+`tool.py` at the repo root is the single source of truth. `src/tool.py` is kept as an exact
+mirror (same content, updated in the same commit) for tooling that expects a `src/` layout —
+it is not a separate build artifact and there is no build step.
 
 ## Cross-Platform & VPS/Docker
 
