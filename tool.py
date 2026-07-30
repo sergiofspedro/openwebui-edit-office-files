@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.4
+version: 3.9.5
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -739,10 +739,66 @@ class Tools:
         file_bytes = _read_file_bytes(file_id)
         return file_bytes, filename, ftype
 
+    def _read_xlsx(self, file_bytes: bytes, filename: str) -> str:
+        """Extract text from an XLSX file."""
+        from openpyxl import load_workbook
+        import io
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        result = []
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                result.append("\t".join(cells))
+        wb.close()
+        return "\n\n".join(result)
+
+    def _read_xls(self, file_bytes: bytes, filename: str) -> str:
+        """Extract text from an XLS file."""
+        import xlrd
+        import io
+        wb = xlrd.open_workbook(file_contents=file_bytes)
+        result = []
+        for si in range(wb.nsheets):
+            ws = wb.sheet_by_index(si)
+            for r in range(ws.nrows):
+                cells = [str(ws.cell_value(r, c)) for c in range(ws.ncols)]
+                result.append("\t".join(cells))
+        return "\n\n".join(result)
+
+    def _read_docx(self, file_bytes: bytes, filename: str) -> str:
+        """Extract text from a DOCX file."""
+        from docx import Document
+        import io
+        doc = Document(io.BytesIO(file_bytes))
+        result = []
+        for p in doc.paragraphs:
+            if p.style.name.startswith("Heading"):
+                level = p.style.name.replace("Heading ", "")
+                result.append(f"{'#' * int(level)} {p.text}")
+            else:
+                result.append(p.text)
+        for t in doc.tables:
+            for row in t.rows:
+                result.append(" | ".join(cell.text for cell in row.cells))
+        return "\n\n".join(result)
+
+    def _read_pptx(self, file_bytes: bytes, filename: str) -> str:
+        """Extract text from a PPTX file."""
+        from pptx import Presentation
+        import io
+        prs = Presentation(io.BytesIO(file_bytes))
+        result = []
+        for si, slide in enumerate(prs.slides, 1):
+            result.append(f"# Slide {si}")
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    result.append(shape.text)
+        return "\n\n".join(result)
+
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
-    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None) -> tuple:
+    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None, __user__=None) -> tuple:
         """Save file to Open WebUI uploads dir, register in DB, return download URL."""
         import base64 as _b64
         import hashlib
@@ -779,7 +835,7 @@ class Tools:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     file_id,
-                    "",
+                    __user__.get("id", "") if __user__ and isinstance(__user__, dict) else "",
                     file_hash,
                     _encode_filename(filename),
                     os.path.join(_UPLOAD_DIR, file_id),
@@ -2688,7 +2744,7 @@ class Tools:
                 tf = txBox.text_frame
                 tf.word_wrap = True
                 p = tf.paragraphs[0]
-                p.text = _format_text(text, mode=fmt_mode)
+                p.text = text
                 p.font.size = Pt(font_size)
                 p.font.bold = bold
                 p.font.color.rgb = hex_to_rgb(color or colors["text"])
@@ -2708,7 +2764,7 @@ class Tools:
             set_slide_bg(slide, colors["bg"])
 
             add_accent_bar(slide, 0, 3.0, 13.333, 0.06, colors["accent"])
-            add_text_box(slide, 1.5, 1.5, 10, 1.5, _format_text(title, mode=fmt_mode), font_size=44, bold=True, color=colors["text"])
+            add_text_box(slide, 1.5, 1.5, 10, 1.5, title, font_size=44, bold=True, color=colors["text"])
             add_text_box(slide, 1.5, 3.3, 10, 0.8, "Generated %s" % datetime.datetime.now().strftime("%B %d, %Y"), font_size=18, color=colors["subtitle"])
 
             # --- Process content into slides ---
@@ -3269,7 +3325,7 @@ class Tools:
                     line = line.strip()
                     if not line: continue
                     if line.startswith('# '):
-                        doc.presentation.addElement(H(outlinelevel=1, text=_format_text(line[2:], mode=fmt_mode)))
+                        doc.presentation.addElement(H(outlinelevel=1, text=line[2:]))
                     else:
                         doc.presentation.addElement(P(text=_format_text(line, mode=fmt_mode)))
             else:
@@ -3278,9 +3334,9 @@ class Tools:
                     line = line.strip()
                     if not line: continue
                     if line.startswith('# '):
-                        doc.text.addElement(H(outlinelevel=1, text=_format_text(line[2:], mode=fmt_mode)))
+                        doc.text.addElement(H(outlinelevel=1, text=line[2:]))
                     elif line.startswith('## '):
-                        doc.text.addElement(H(outlinelevel=2, text=_format_text(line[3:], mode=fmt_mode)))
+                        doc.text.addElement(H(outlinelevel=2, text=line[3:]))
                     else:
                         doc.text.addElement(P(text=_format_text(line, mode=fmt_mode)))
             
@@ -3429,7 +3485,7 @@ class Tools:
         chart_types = {"bar": BarChart, "line": LineChart, "pie": PieChart, "scatter": ScatterChart}
         chart_class = chart_types.get(chart_type, BarChart)
         chart = chart_class()
-        chart.title = _format_text(title, mode="format")
+        chart.title = title
         chart.style = 10
         
         if ws.max_row > 1:
@@ -3468,7 +3524,7 @@ class Tools:
                 p = header.paragraphs[0]
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 run = p.add_run()
-                run.text = _format_text(text, mode="format")
+                run.text = text
                 run.font.size = Pt(72)
                 run.font.color.rgb = RGBColor(128, 128, 128)
             buf = io.BytesIO()
@@ -3535,26 +3591,26 @@ class Tools:
             from docx import Document
             doc = Document(io.BytesIO(file_bytes))
             cp = doc.core_properties
-            if author: cp.author = _format_text(author, mode="format"); changes.append("author")
-            if title: cp.title = _format_text(title, mode="format"); changes.append("title")
-            if subject: cp.subject = _format_text(subject, mode="format"); changes.append("subject")
-            if keywords: cp.keywords = _format_text(keywords, mode="format"); changes.append("keywords")
+            if author: cp.author = author; changes.append("author")
+            if title: cp.title = title; changes.append("title")
+            if subject: cp.subject = subject; changes.append("subject")
+            if keywords: cp.keywords = keywords; changes.append("keywords")
             buf = io.BytesIO(); doc.save(buf); buf.seek(0)
         elif ftype == "xlsx":
             from openpyxl import load_workbook
             wb = load_workbook(io.BytesIO(file_bytes))
-            if author: wb.properties.creator = _format_text(author, mode="format"); changes.append("author")
-            if title: wb.properties.title = _format_text(title, mode="format"); changes.append("title")
-            if subject: wb.properties.subject = _format_text(subject, mode="format"); changes.append("subject")
+            if author: wb.properties.creator = author; changes.append("author")
+            if title: wb.properties.title = title; changes.append("title")
+            if subject: wb.properties.subject = subject; changes.append("subject")
             buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         elif ftype == "pptx":
             from pptx import Presentation
             prs = Presentation(io.BytesIO(file_bytes))
             cp = prs.core_properties
-            if author: cp.author = _format_text(author, mode="format"); changes.append("author")
-            if title: cp.title = _format_text(title, mode="format"); changes.append("title")
-            if subject: cp.subject = _format_text(subject, mode="format"); changes.append("subject")
-            if keywords: cp.keywords = _format_text(keywords, mode="format"); changes.append("keywords")
+            if author: cp.author = author; changes.append("author")
+            if title: cp.title = title; changes.append("title")
+            if subject: cp.subject = subject; changes.append("subject")
+            if keywords: cp.keywords = keywords; changes.append("keywords")
             buf = io.BytesIO(); prs.save(buf); buf.seek(0)
         else:
             return json.dumps({"error": f"Metadata editing not supported for {ftype}"})
@@ -3630,7 +3686,7 @@ class Tools:
         for shape in slide.shapes:
             if shape.shape_type == 13:
                 if pic_count == shape_index:
-                    shape.alt_text = _format_text(alt_text, mode="format")
+                    shape.alt_text = alt_text
                     buf = io.BytesIO()
                     prs.save(buf)
                     buf.seek(0)
@@ -3877,7 +3933,7 @@ class Tools:
             return json.dumps({"error": "Slide " + str(slide_num) + " not found. Has " + str(len(prs.slides)) + " slides."})
         slide = prs.slides[slide_num - 1]
         notes_slide = slide.notes_slide
-        notes_slide.notes_text_frame.text = _format_text(notes, mode="format")
+        notes_slide.notes_text_frame.text = notes
         buf = io.BytesIO(); prs.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return "Speaker notes added to slide " + str(slide_num) + ": [" + str(fname) + "](" + str(url) + ")"
@@ -4509,7 +4565,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         doc = Document(io.BytesIO(file_bytes))
         if doc.paragraphs:
             para = doc.paragraphs[0]
-            comment = doc.add_comment(_format_text(text, mode="format"), author=author)
+            comment = doc.add_comment(text, author=author)
             para.add_comment(comment)
         buf = io.BytesIO(); doc.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
