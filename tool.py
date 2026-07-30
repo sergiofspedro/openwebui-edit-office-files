@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.6
+version: 3.9.7
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -138,7 +138,7 @@ def _read_file_bytes(file_id: str) -> Optional[bytes]:
         for _base in (_UPLOAD_DIR, _EXPORT_DIR,
                        os.path.join(os.environ.get("OPEN_WEBUI_DATA_DIR", ""), "data"),
                        _get_owui_data_dir()):
-            if _base and os.path.realpath(_base) in _abs:
+            if _base and _abs.startswith(os.path.realpath(_base) + os.sep):
                 _allowed = True
                 break
         if not _allowed:
@@ -2598,7 +2598,7 @@ class Tools:
                 in_quote = True
                 quote_text = line.strip('"')
                 continue
-            elif in_quote and line.startswith('\u2014') or (in_quote and not line.startswith('"')):
+            elif in_quote and (line.startswith('\u2014') or (line.strip() and not line.startswith('"') and not line.startswith('#') and not line.startswith('-') and not line.startswith('*') and not line.startswith('>') and not line.startswith('|') and not line.startswith('@') and not line.startswith('```'))):
                 quote_author = line.lstrip('\u2014 ').strip()
                 add_pull_quote(doc, quote_text, quote_author)
                 in_quote = False; quote_text = ""; quote_author = ""
@@ -2908,8 +2908,11 @@ class Tools:
                 return json.dumps({"error": "No data provided"})
 
             # Write data
-            for row in data:
-                ws.append([_format_text(c, mode=fmt_mode) if isinstance(c, str) else c for c in row])
+            for i, row in enumerate(data):
+                if i == 0:
+                    ws.append(row)  # Headers: preserve original case
+                else:
+                    ws.append([_format_text(c, mode=fmt_mode) if isinstance(c, str) else c for c in row])
 
             # Style header row
             for cell in ws[1]:
@@ -2995,14 +2998,10 @@ class Tools:
                 return json.dumps({"error": "File not found"})
             filename = row[0]
             meta = json.loads(row[1]) if row[1] else {}
-            fp = meta.get("path", file_id)
-            if not os.path.exists(fp):
-                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
-            if not os.path.exists(fp):
+            data = _read_file_bytes(meta.get("path", file_id))
+            if not data:
                 conn2.close()
                 return json.dumps({"error": "File not found on disk"})
-            with open(fp, "rb") as f:
-                data = f.read()
             conn2.close()
     
             from docx import Document
@@ -3064,13 +3063,10 @@ class Tools:
                     continue
                 filename = row[0]
                 meta = json.loads(row[1]) if row[1] else {}
-                fp = meta.get("path", fid)
-                if not os.path.exists(fp):
-                    alt = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
-                    fp = alt if os.path.exists(alt) else ""
-                if not fp or not os.path.exists(fp):
+                data = _read_file_bytes(meta.get("path", fid))
+                if not data:
                     continue
-                wb_src = openpyxl.load_workbook(io.BytesIO(open(fp,"rb").read()))
+                wb_src = openpyxl.load_workbook(io.BytesIO(data))
                 base_name = os.path.splitext(os.path.basename(filename))[0][:15]
                 for sn in wb_src.sheetnames:
                     ws_src = wb_src[sn]
@@ -3153,12 +3149,10 @@ class Tools:
                 if not row:
                     continue
                 meta = json.loads(row[0]) if row[0] else {}
-                fp = meta.get("path", fid)
-                if not os.path.exists(fp):
-                    fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
-                if not os.path.exists(fp):
+                data = _read_file_bytes(meta.get("path", fid))
+                if not data:
                     continue
-                src = fitz.open(fp)
+                src = fitz.open(stream=data, filetype="pdf")
                 merger.insert_pdf(src)
                 src.close()
                 count += 1
@@ -3189,14 +3183,11 @@ class Tools:
                 conn2.close()
                 return json.dumps({"error": "File not found"})
             meta = json.loads(row[0]) if row[0] else {}
-            fp = meta.get("path", file_id)
-            if not os.path.exists(fp):
-                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
-            if not os.path.exists(fp):
+            data = _read_file_bytes(meta.get("path", file_id))
+            if not data:
                 conn2.close()
                 return json.dumps({"error": "File not found on disk"})
-            conn2.close()
-            src = fitz.open(fp)
+            src = fitz.open(stream=data, filetype="pdf")
             total_pages = src.page_count
             urls = []
             for start in range(0, total_pages, pages_per_file):
@@ -3301,11 +3292,10 @@ class Tools:
                 return json.dumps({"error": "File not found"})
             filename = row[0]
             meta = json.loads(row[1]) if row[1] else {}
-            fp = meta.get("path", file_id)
-            if not os.path.exists(fp):
-                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
-            with open(fp, "rb") as f:
-                data = f.read()
+            data = _read_file_bytes(meta.get("path", file_id))
+            if not data:
+                conn2.close()
+                return json.dumps({"error": "File not found on disk"})
             conn2.close()
     
             from docx_revisions import RevisionDocument
@@ -3582,7 +3572,7 @@ class Tools:
             for section in doc.sections:
                 header = section.header
                 header.is_linked_to_previous = False
-                p = header.paragraphs[0]
+                p = header.add_paragraph()
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 run = p.add_run()
                 run.text = text
@@ -4234,6 +4224,14 @@ class Tools:
         elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
         else: return json.dumps({"error": "Export not supported for " + str(ftype)})
         base = os.path.splitext(filename)[0]
+        html_c = content.replace('\n', '<br>\n')
+        html_c = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html_c, flags=re.MULTILINE)
+        html_c = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html_c, flags=re.MULTILINE)
+        html_c = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html_c, flags=re.MULTILINE)
+        html_c = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_c)
+        html_c = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html_c)
+        html_c = re.sub(r'`(.+?)`', r'<code>\1</code>', html_c)
+        html_c = re.sub(r'^- (.+)$', r'<li>\1</li>', html_c, flags=re.MULTILINE)
         html = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4254,7 +4252,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 </style>
 </head>
 <body>
-""" + content.replace('\n', '<br>\n').replace('## ', '<h2>').replace('# ', '<h1>') + """
+""" + html_c + """
 </body>
 </html>"""
         html_bytes = html.encode('utf-8')
