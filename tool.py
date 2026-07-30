@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.7
+version: 3.9.8
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -806,6 +806,33 @@ class Tools:
                     result.append(shape.text)
         return "\n\n".join(result)
 
+    def _parse_csv_rows(self, content: str) -> list:
+        """Parse CSV content into a list of rows with type conversion."""
+        import csv as _csv_mod
+        reader = _csv_mod.reader(io.StringIO(content))
+        parsed_rows = []
+        for csv_row in reader:
+            converted = []
+            for v in csv_row:
+                v = v.strip()
+                if v == '':
+                    converted.append(None)
+                else:
+                    try:
+                        converted.append(int(v))
+                    except ValueError:
+                        try:
+                            converted.append(float(v))
+                        except ValueError:
+                            if v.lower() == 'true':
+                                converted.append(True)
+                            elif v.lower() == 'false':
+                                converted.append(False)
+                            else:
+                                converted.append(v)
+            parsed_rows.append(converted)
+        return parsed_rows
+
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
@@ -883,6 +910,8 @@ class Tools:
         except Exception as e:
             print(f"[office] Save failed: {e}", file=sys.stderr)
             try:
+                if len(file_bytes) > 1_000_000:  # 1MB limit
+                    return (None, None)
                 data = _b64.b64encode(file_bytes).decode("ascii")
                 return (f"data:{content_type};base64,{data}", filename)
             except Exception:
@@ -1043,7 +1072,7 @@ class Tools:
 
             elif file_type == "docx":
                 from docx import Document
-                from docx.enum.text import WD_COLOR_INDEX
+                from docx.shared import Pt
                 doc = Document(io.BytesIO(file_data))
                 paragraphs = []
                 for p in doc.paragraphs:
@@ -1157,29 +1186,7 @@ class Tools:
                     out_name = os.path.splitext(filename)[0] + "_edited.xlsx"
 
                 # Parse CSV content
-                import csv as _csv_mod
-                reader = _csv_mod.reader(io.StringIO(content))
-                parsed_rows = []
-                for csv_row in reader:
-                    converted = []
-                    for v in csv_row:
-                        v = v.strip()
-                        if v == '':
-                            converted.append(None)
-                        else:
-                            try:
-                                converted.append(int(v))
-                            except ValueError:
-                                try:
-                                    converted.append(float(v))
-                                except ValueError:
-                                    if v.lower() == 'true':
-                                        converted.append(True)
-                                    elif v.lower() == 'false':
-                                        converted.append(False)
-                                    else:
-                                        converted.append(v)
-                    parsed_rows.append(converted)
+                parsed_rows = self._parse_csv_rows(content)
 
                 if not parsed_rows:
                     return json.dumps({"error": "No rows provided in CSV content"})
@@ -1227,29 +1234,7 @@ class Tools:
                 ws = wb.active
 
                 # Parse CSV content
-                import csv as _csv_mod
-                reader = _csv_mod.reader(io.StringIO(content))
-                parsed_rows = []
-                for csv_row in reader:
-                    converted = []
-                    for v in csv_row:
-                        v = v.strip()
-                        if v == '':
-                            converted.append(None)
-                        else:
-                            try:
-                                converted.append(int(v))
-                            except ValueError:
-                                try:
-                                    converted.append(float(v))
-                                except ValueError:
-                                    if v.lower() == 'true':
-                                        converted.append(True)
-                                    elif v.lower() == 'false':
-                                        converted.append(False)
-                                    else:
-                                        converted.append(v)
-                    parsed_rows.append(converted)
+                parsed_rows = self._parse_csv_rows(content)
 
                 if not parsed_rows:
                     return json.dumps({"error": "No rows provided in CSV content"})
@@ -1296,7 +1281,30 @@ class Tools:
                     last_style = doc.paragraphs[-1].style.name if doc.paragraphs[-1].style else "Normal"
 
                 for line in content.split("\n"):
-                    doc.add_paragraph(line, style=last_style)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
+                        level = line.count('#')
+                        text = line.lstrip('#').strip()
+                        doc.add_heading(text, level=min(level, 3))
+                    elif line.startswith('- ') or line.startswith('* '):
+                        text = line[2:].strip()
+                        doc.add_paragraph(text, style='List Bullet')
+                    else:
+                        segments = _parse_inline_md(line)
+                        p = doc.add_paragraph(style=last_style)
+                        for seg_text, fmt in segments:
+                            if not seg_text:
+                                continue
+                            run = p.add_run(seg_text)
+                            if fmt.get('code'):
+                                run.font.name = "Consolas"
+                                run.font.size = Pt(9)
+                            if fmt.get('bold'):
+                                run.font.bold = True
+                            if fmt.get('italic'):
+                                run.font.italic = True
 
                 out = io.BytesIO()
                 doc.save(out)
@@ -1326,7 +1334,7 @@ class Tools:
                         Inches(0.5), Inches(0.3), Inches(9), Inches(1)
                     )
                     tf = txBox.text_frame
-                    tf.text = title
+                    tf.text = _format_text(title, mode="format")
                     p = tf.paragraphs[0]
                     p.font.size = Inches(0.6)
                     p.font.bold = True
@@ -1337,7 +1345,7 @@ class Tools:
                             Inches(0.5), Inches(1.5), Inches(9), Inches(5.5)
                         )
                         tf2 = txBox2.text_frame
-                        tf2.text = body
+                        tf2.text = _format_text(body, mode="format")
                         for para in tf2.paragraphs:
                             para.font.size = Inches(0.3)
 
@@ -1499,9 +1507,9 @@ class Tools:
                             for para in shape.text_frame.paragraphs:
                                 if find_text in para.text:
                                     if para.runs:
-                                        para.runs[0].text = para.text.replace(find_text, replace_with)
-                                        for run in para.runs[1:]:
-                                            run.text = ""
+                                        for run in para.runs:
+                                            if find_text in run.text:
+                                                run.text = run.text.replace(find_text, replace_with)
                                     else:
                                         para.text = para.text.replace(find_text, replace_with)
                                     count += 1
@@ -1749,7 +1757,7 @@ class Tools:
                 )
                 protection.set(qn("w:edit"), "readOnly")
                 protection.set(qn("w:enforcement"), "1")
-                pw_hash = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+                pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest().upper()
                 protection.set(qn("w:cryptProviderType"), "rsaAES")
                 protection.set(qn("w:cryptAlgorithmClass"), "hash")
                 protection.set(qn("w:cryptAlgorithmType"), "typeAny")
