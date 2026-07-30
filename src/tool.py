@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.2
+version: 3.9.3
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -560,7 +560,7 @@ def _read_odf(file_bytes: bytes, filename: str) -> str:
 # ---------------------------------------------------------------------------
 # Professional document helpers
 # ---------------------------------------------------------------------------
-def _add_callout_box(doc, lines, colors, hex_to_rgb):
+def _add_callout_box(doc, lines, colors, hex_to_rgb, fmt_mode="format"):
     """Add a professional callout box (note/tip/warning)."""
     from docx.shared import Pt, RGBColor, Inches
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -576,7 +576,7 @@ def _add_callout_box(doc, lines, colors, hex_to_rgb):
         border_color = "27AE60"
         bg_color = "E8F8F5"
         icon = "\U0001f4a1"
-    elif first_line.startswith("**note") or first_line.startswith("**info") or True:
+    elif first_line.startswith("**note") or first_line.startswith("**info"):
         border_color = colors.get("accent", "2E75B6")
         bg_color = colors.get("light", "D6E4F0")
         icon = "\U0001f4cc"
@@ -602,26 +602,48 @@ def _add_callout_box(doc, lines, colors, hex_to_rgb):
     tcPr.append(borders)
 
     for i, line in enumerate(lines):
-        text = _format_text(line, mode="format")
-        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+        text = _format_text(line, mode=fmt_mode)
+        segments = _parse_inline_md(text)
         if i == 0:
             p = cell.paragraphs[0]
             p.paragraph_format.space_before = Pt(6)
-            run = p.add_run(f"{icon} {text}")
+            run = p.add_run(f"{icon} ")
             run.font.size = Pt(11)
             run.font.bold = True
             run.font.name = 'Calibri'
+            for seg_text, fmt in segments:
+                if not seg_text:
+                    continue
+                run = p.add_run(seg_text)
+                run.font.size = Pt(11)
+                run.font.bold = True
+                run.font.name = 'Calibri'
+                if fmt.get('italic'):
+                    run.font.italic = True
+                if fmt.get('code'):
+                    run.font.name = 'Consolas'
+                    run.font.size = Pt(9)
         else:
             p = cell.add_paragraph()
             p.paragraph_format.space_before = Pt(2)
-            run = p.add_run(text)
-            run.font.size = Pt(10)
-            run.font.name = 'Calibri'
+            for seg_text, fmt in segments:
+                if not seg_text:
+                    continue
+                run = p.add_run(seg_text)
+                run.font.size = Pt(10)
+                run.font.name = 'Calibri'
+                if fmt.get('bold'):
+                    run.font.bold = True
+                if fmt.get('italic'):
+                    run.font.italic = True
+                if fmt.get('code'):
+                    run.font.name = 'Consolas'
+                    run.font.size = Pt(9)
 
     doc.add_paragraph()
 
 
-def _add_professional_table(doc, rows, colors, hex_to_rgb):
+def _add_professional_table(doc, rows, colors, hex_to_rgb, fmt_mode="format"):
     """Add a professionally styled table."""
     from docx.shared import Pt, RGBColor, Inches
     from docx.oxml.ns import qn, nsdecls
@@ -639,7 +661,7 @@ def _add_professional_table(doc, rows, colors, hex_to_rgb):
         for j, cell_text in enumerate(row_data):
             if j < num_cols:
                 cell = table.rows[i].cells[j]
-                cell.text = _format_text(cell_text, mode="format")
+                cell.text = _format_text(cell_text, mode=fmt_mode)
                 for paragraph in cell.paragraphs:
                     paragraph.paragraph_format.space_before = Pt(2)
                     paragraph.paragraph_format.space_after = Pt(2)
@@ -652,7 +674,7 @@ def _add_professional_table(doc, rows, colors, hex_to_rgb):
     doc.add_paragraph()
 
 
-def _render_content_slide(prs, lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_num):
+def _render_content_slide(prs, lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_num, fmt_mode="format"):
     """Render a content slide with professional layout."""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     set_slide_bg(slide, colors["bg"])
@@ -664,12 +686,12 @@ def _render_content_slide(prs, lines, colors, hex_to_rgb, add_text_box, add_acce
             continue
 
         if line.startswith('# ') or line.startswith('## '):
-            text = _format_text(line.lstrip('#').strip(), mode="format")
+            text = line.lstrip('#').strip()
             add_accent_bar(slide, 0.8, y_pos + 0.15, 0.06, 0.5, colors["accent"])
             add_text_box(slide, 1.1, y_pos, 11, 0.7, text, font_size=28, bold=True, color=colors["text"])
             y_pos += 0.9
         elif line.startswith('- ') or line.startswith('* '):
-            text = _format_text(line[2:].strip(), mode="format")
+            text = _format_text(line[2:].strip(), mode=fmt_mode)
             add_text_box(slide, 1.5, y_pos, 10.5, 0.5, "\u2022 " + text, font_size=16, color=colors["text"])
             y_pos += 0.5
         elif line.startswith('|'):
@@ -679,7 +701,7 @@ def _render_content_slide(prs, lines, colors, hex_to_rgb, add_text_box, add_acce
             add_text_box(slide, 1.0, y_pos, 11, 0.5, "  |  ".join(cells), font_size=14, color=colors["text"])
             y_pos += 0.4
         else:
-            text = _format_text(line, mode="format")
+            text = _format_text(line, mode=fmt_mode)
             add_text_box(slide, 1.0, y_pos, 11.5, 0.5, text, font_size=16, color=colors["text"])
             y_pos += 0.5
 
@@ -2699,14 +2721,14 @@ class Tools:
 
                 if line.startswith('# ') or line.startswith('## '):
                     if current_slide_lines:
-                        _render_content_slide(prs, current_slide_lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_count)
+                        _render_content_slide(prs, current_slide_lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_count, fmt_mode=fmt_mode)
                         slide_count += 1
                     current_slide_lines = [line]
                 else:
                     current_slide_lines.append(line)
 
             if current_slide_lines:
-                _render_content_slide(prs, current_slide_lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_count)
+                _render_content_slide(prs, current_slide_lines, colors, hex_to_rgb, add_text_box, add_accent_bar, set_slide_bg, slide_count, fmt_mode=fmt_mode)
 
             out = io.BytesIO()
             prs.save(out)
