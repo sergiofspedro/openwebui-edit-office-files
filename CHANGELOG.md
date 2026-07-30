@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.2] - 2026-07-30
+
+### Fixed
+- **`create_file()` for DOCX crashed with `NameError: RGBColor not defined` when rendering
+  links** — added `RGBColor` to the `docx.shared` import. (BUG-1)
+- **`_format_text()` split sentences on abbreviations** like "Dr.", "e.g.", "U.S.A." — added
+  a comprehensive abbreviation exclusion list with negative lookbehind regex. (BUG-2)
+- **`_parse_inline_md()` link regex broke on URLs with parentheses** (e.g. Wikipedia) — the
+  `.+?` pattern stopped at the first `)`. Replaced with a balanced-parentheses-aware regex.
+  (BUG-3)
+- **`_parse_inline_md()` link label extraction used fragile `split('](')`** — switched to
+  storing the regex group `(label, url)` tuple directly. (BUG-4)
+
 ## [3.9.0] - 2026-07-28
 
 ### Fixed

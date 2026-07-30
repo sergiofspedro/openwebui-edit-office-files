@@ -3,8 +3,8 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.1
-requirements: openpyxl, python-docx, python-pptx, xlrd, docx-revisions, lxml, odfpy, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
+version: 3.9.2
+requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
 import io
@@ -228,15 +228,6 @@ def _xls_to_xlsx(xls_data: bytes) -> bytes:
 
                 ws.cell(row=rx + 1, column=cx + 1, value=value)
 
-        # Carry over merged-cell ranges — xlrd's merged_cells are (rlo, rhi, clo, chi) with
-        # rhi/chi exclusive and 0-indexed, so +1 on the lows converts to openpyxl's 1-indexed
-        # inclusive range directly.
-        for rlo, rhi, clo, chi in getattr(xls_sheet, "merged_cells", []):
-            try:
-                ws.merge_cells(start_row=rlo + 1, start_column=clo + 1, end_row=rhi, end_column=chi)
-            except Exception:
-                pass
-
         # Auto-fit column widths (rough estimate)
         for col_cells in ws.columns:
             max_len = 0
@@ -285,11 +276,22 @@ def _format_text(text: str, mode: str = "format") -> str:
         text = pattern.sub(placeholder, text)
         acronym_map[placeholder] = acro
     
+    # Common abbreviations that should NOT end a sentence (lowercase with period)
+    _ABBREV = {'Dr', 'Mr', 'Mrs', 'Ms', 'Prof', 'Sr', 'Jr', 'St', 'vs', 'etc',
+               'e.g', 'i.e', 'a.m', 'p.m', 'approx', 'dept', 'est', 'inc', 'ltd',
+               'co', 'corp', 'vol', 'ed', 'fig', 'no', 'nos', 'p', 'pp', 'ch', 'sec',
+               'Jan', 'Feb', 'Mar', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+               'U.S', 'U.K', 'E.U', 'Ph.D', 'M.D', 'B.A', 'M.A', 'B.S', 'M.S'}
+
+    # Build negative lookbehind for abbreviations
+    _abbrev_pattern = '|'.join(_re.escape(a) for a in sorted(_ABBREV, key=len, reverse=True))
+    _sentence_re = _re.compile(r'(?<!\b(?:' + _abbrev_pattern + r'))(?<=[.!?])\s+')
+    sentences = _sentence_re.split(text)
+
     # Sentence case with intentional capitalization preservation
     # Rule: words with ANY uppercase letter are preserved as-is (proper nouns,
     # acronyms not in the list, product names, the pronoun "I", etc.).
     # Words that are entirely lowercase get sentence-cased.
-    sentences = _re.split(r'(?<=[.!?])\s+', text)
     formatted_sentences = []
     for s in sentences:
         s = s.strip()
@@ -359,7 +361,7 @@ def _parse_inline_md(text: str) -> list[tuple[str, dict]]:
         return [("", {})]
 
     # Regexes — link first to prevent its brackets from being consumed by bold/italic
-    _link_re = _re.compile(r'\[(.+?)\]\((.+?)\)')
+    _link_re = _re.compile(r'\[(.+?)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
     _bold_re = _re.compile(r'\*\*(.+?)\*\*')
     _italic_re = _re.compile(r'(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)')
     _code_re = _re.compile(r'`(.+?)`')
@@ -372,7 +374,7 @@ def _parse_inline_md(text: str) -> list[tuple[str, dict]]:
 
     # Links
     for m in _link_re.finditer(text):
-        markers.append((m.start(), m.end(), 'link', m.group(2)))  # group(2) = url
+        markers.append((m.start(), m.end(), 'link', (m.group(1), m.group(2))))  # (label, url)
 
     # Bold
     for m in _bold_re.finditer(text):
@@ -411,15 +413,19 @@ def _parse_inline_md(text: str) -> list[tuple[str, dict]]:
             segments.append((text[pos:start], {}))
         # The formatted segment
         fmt: dict = {}
-        if kind == 'bold':
-            fmt['bold'] = True
-        elif kind == 'italic':
-            fmt['italic'] = True
-        elif kind == 'code':
-            fmt['code'] = True
-        elif kind == 'link':
-            fmt['link'] = data  # data is the URL
-        segments.append((data if kind != 'link' else text[start:end].split('](')[0][1:], fmt))
+        if kind == 'link':
+            label, url = data
+            fmt['link'] = url
+            text_part = label
+        else:
+            if kind == 'bold':
+                fmt['bold'] = True
+            elif kind == 'italic':
+                fmt['italic'] = True
+            elif kind == 'code':
+                fmt['code'] = True
+            text_part = data
+        segments.append((text_part, fmt))
         pos = end
 
     # Trailing plain text
@@ -691,11 +697,6 @@ class Tools:
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
         language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
-        debug_errors: bool = Field(
-            default=False,
-            description="Include the full Python traceback in error responses (for debugging). "
-                        "Off by default to keep normal-operation error payloads short.",
-        )
         pass
 
     def __init__(self):
@@ -711,71 +712,10 @@ class Tools:
         file_bytes = _read_file_bytes(file_id)
         return file_bytes, filename, ftype
 
-    def _read_xlsx(self, file_bytes: bytes, filename: str) -> str:
-        """Read an .xlsx file and return a lightweight text representation (rows joined by ' | ')."""
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-            result = []
-            for ws in wb.worksheets:
-                if len(wb.worksheets) > 1:
-                    result.append(f"## {ws.title}")
-                for row in ws.iter_rows(values_only=True):
-                    cells = ["" if v is None else str(v) for v in row]
-                    if any(c for c in cells):
-                        result.append(" | ".join(cells))
-            wb.close()
-            return "\n".join(result) if result else "(empty spreadsheet)"
-        except Exception as e:
-            return f"Error reading {filename}: {str(e)}"
-
-    def _read_xls(self, file_bytes: bytes, filename: str) -> str:
-        """Read a legacy .xls file and return a lightweight text representation."""
-        try:
-            xlsx_bytes = _xls_to_xlsx(file_bytes)
-            return self._read_xlsx(xlsx_bytes, filename)
-        except Exception as e:
-            return f"Error reading {filename}: {str(e)}"
-
-    def _read_docx(self, file_bytes: bytes, filename: str) -> str:
-        """Read a .docx file and return a lightweight text representation (headings as '## text')."""
-        try:
-            from docx import Document
-            doc = Document(io.BytesIO(file_bytes))
-            result = []
-            for p in doc.paragraphs:
-                text = p.text.strip()
-                if not text:
-                    continue
-                style = p.style.name if p.style else ""
-                if style and style.lower().startswith("heading"):
-                    result.append(f"## {text}")
-                else:
-                    result.append(text)
-            return "\n\n".join(result) if result else "(empty document)"
-        except Exception as e:
-            return f"Error reading {filename}: {str(e)}"
-
-    def _read_pptx(self, file_bytes: bytes, filename: str) -> str:
-        """Read a .pptx file and return a lightweight text representation ('Slide N: text')."""
-        try:
-            from pptx import Presentation
-            prs = Presentation(io.BytesIO(file_bytes))
-            result = []
-            for i, slide in enumerate(prs.slides, 1):
-                texts = []
-                for shape in slide.shapes:
-                    if shape.has_text_frame and shape.text_frame.text.strip():
-                        texts.append(shape.text_frame.text.strip())
-                result.append(f"Slide {i}: " + " | ".join(texts) if texts else f"Slide {i}: (no text)")
-            return "\n".join(result) if result else "(empty presentation)"
-        except Exception as e:
-            return f"Error reading {filename}: {str(e)}"
-
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
-    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None, __user__=None) -> tuple:
+    async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None) -> tuple:
         """Save file to Open WebUI uploads dir, register in DB, return download URL."""
         import base64 as _b64
         import hashlib
@@ -864,8 +804,6 @@ class Tools:
         sheet_name: str = "",
         row_start: int = 1,
         row_end: int = 0,
-        max_paragraphs: int = 200,
-        max_slides: int = 50,
         __user__=None,
         __request__=None,
     ) -> str:
@@ -877,18 +815,12 @@ class Tools:
         For pptx: returns slides with shapes and text.
         Legacy .doc and .ppt formats return a helpful error message.
 
-        Long files are truncated (with a "truncated" note in the result) rather than dumping
-        an unbounded amount of content — raise the relevant max_* param or use row_start/row_end
-        to page through a large spreadsheet.
-
         Args:
             file_id: The Open WebUI file ID (UUID) or filename
-            max_rows: Maximum spreadsheet rows to return (default 500)
+            max_rows: Maximum rows to return (default 500)
             sheet_name: Optional - read only this sheet (xlsx/xls only)
             row_start: Starting row (1-indexed, default 1)
             row_end: Ending row (0 = use max_rows limit)
-            max_paragraphs: Maximum docx paragraphs to return (default 200)
-            max_slides: Maximum pptx slides to return (default 50)
         """
         try:
             file_data = _read_file_bytes(file_id)
@@ -943,10 +875,6 @@ class Tools:
                             sheet["headers"] = [str(v) if v is not None else "" for v in rd]
                         else:
                             sheet["rows"].append(rd)
-                    if sheet["total_rows"] > len(sheet["rows"]) + 1:
-                        sheet["truncated"] = True
-                        sheet["returned_rows"] = len(sheet["rows"])
-                        sheet["note"] = f"{sheet['total_rows'] - len(sheet['rows']) - 1} more row(s) not shown — use row_start/row_end or max_rows to page through."
                     result["sheets"].append(sheet)
                 wb.close()
 
@@ -1024,21 +952,21 @@ class Tools:
                 from docx.enum.text import WD_COLOR_INDEX
                 doc = Document(io.BytesIO(file_data))
                 paragraphs = []
-                nonempty_paras = [p for p in doc.paragraphs if p.text.strip()]
-                for p in nonempty_paras[:max_paragraphs] if max_paragraphs else nonempty_paras:
-                    style = p.style.name if p.style else "Normal"
-                    runs_info = []
-                    for run in p.runs:
-                        run_data = {"text": run.text}
-                        if run.font.highlight_color and run.font.highlight_color != WD_COLOR_INDEX.AUTO:
-                            run_data["highlighted"] = True
-                            run_data["highlight_color"] = str(run.font.highlight_color)
-                        if run.font.bold:
-                            run_data["bold"] = True
-                        if run.font.italic:
-                            run_data["italic"] = True
-                        runs_info.append(run_data)
-                    paragraphs.append({"style": style, "text": p.text, "runs": runs_info})
+                for p in doc.paragraphs:
+                    if p.text.strip():
+                        style = p.style.name if p.style else "Normal"
+                        runs_info = []
+                        for run in p.runs:
+                            run_data = {"text": run.text}
+                            if run.font.highlight_color and run.font.highlight_color != WD_COLOR_INDEX.AUTO:
+                                run_data["highlighted"] = True
+                                run_data["highlight_color"] = str(run.font.highlight_color)
+                            if run.font.bold:
+                                run_data["bold"] = True
+                            if run.font.italic:
+                                run_data["italic"] = True
+                            runs_info.append(run_data)
+                        paragraphs.append({"style": style, "text": p.text, "runs": runs_info})
                 tables = []
                 for t in doc.tables:
                     tbl = {"rows": []}
@@ -1047,18 +975,12 @@ class Tools:
                     tables.append(tbl)
                 result["paragraphs"] = paragraphs
                 result["tables"] = tables
-                if max_paragraphs and len(nonempty_paras) > max_paragraphs:
-                    result["truncated"] = True
-                    result["returned_paragraphs"] = max_paragraphs
-                    result["total_paragraphs"] = len(nonempty_paras)
-                    result["note"] = f"{len(nonempty_paras) - max_paragraphs} more paragraph(s) not shown — raise max_paragraphs to see more."
 
             elif file_type == "pptx":
                 from pptx import Presentation
                 prs = Presentation(io.BytesIO(file_data))
                 slides = []
-                all_slides = list(prs.slides)
-                for si, slide in enumerate(all_slides[:max_slides] if max_slides else all_slides, 1):
+                for si, slide in enumerate(prs.slides, 1):
                     sdata: Dict[str, Any] = {"number": si, "shapes": []}
                     for shape in slide.shapes:
                         if hasattr(shape, "text") and shape.text.strip():
@@ -1074,11 +996,6 @@ class Tools:
                             sdata["tables"] = tbl
                     slides.append(sdata)
                 result["slides"] = slides
-                if max_slides and len(all_slides) > max_slides:
-                    result["truncated"] = True
-                    result["returned_slides"] = max_slides
-                    result["total_slides"] = len(all_slides)
-                    result["note"] = f"{len(all_slides) - max_slides} more slide(s) not shown — raise max_slides to see more."
 
             elif file_type == "doc":
                 result["error"] = "Legacy .doc format is not supported. Please convert to .docx first."
@@ -1089,13 +1006,10 @@ class Tools:
             else:
                 result["error"] = f"Unsupported file type. Detected: {file_type}. Supported: xlsx, xls, docx, pptx"
 
-            return json.dumps(result, default=str, ensure_ascii=False, separators=(",", ":"))
+            return json.dumps(result, indent=2, default=str, ensure_ascii=False)
 
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     # -----------------------------------------------------------------
     # ADD CONTENT
@@ -1189,14 +1103,10 @@ class Tools:
                                 "number_format": cell.number_format,
                             }
 
-                from openpyxl.cell.cell import MergedCell
-
                 start = (ws.max_row or 0) + 1
                 for i, rd in enumerate(parsed_rows):
                     for j, v in enumerate(rd, 1):
                         cell = ws.cell(row=start + i, column=j)
-                        if isinstance(cell, MergedCell):
-                            continue  # non-top-left cell of a merged range, skip
                         if j in ref:
                             try:
                                 cell.font = copy(ref[j]["font"])
@@ -1262,14 +1172,10 @@ class Tools:
                                 "number_format": cell.number_format,
                             }
 
-                from openpyxl.cell.cell import MergedCell
-
                 start = (ws.max_row or 0) + 1
                 for i, rd in enumerate(parsed_rows):
                     for j, v in enumerate(rd, 1):
                         cell = ws.cell(row=start + i, column=j)
-                        if isinstance(cell, MergedCell):
-                            continue  # non-top-left cell of a merged range, skip
                         if j in ref:
                             try:
                                 cell.font = copy(ref[j]["font"])
@@ -1354,10 +1260,7 @@ class Tools:
             return json.dumps({"error": "Could not save file"})
 
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     # -----------------------------------------------------------------
     # REPLACE TEXT
@@ -1524,10 +1427,7 @@ class Tools:
             return json.dumps({"error": "Could not save file"})
 
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     # -----------------------------------------------------------------
     # UPDATE CELLS
@@ -1580,12 +1480,9 @@ class Tools:
             except json.JSONDecodeError:
                 return json.dumps({"error": "cells must be valid JSON (array of {cell, value} objects)"})
 
-            from openpyxl.cell.cell import MergedCell
-
             out_name = output_filename or os.path.splitext(filename)[0] + "_updated.xlsx"
             wb = openpyxl.load_workbook(io.BytesIO(file_data))
             count = 0
-            skipped_merged = []
             for upd in updates:
                 cell_ref = upd.get("cell", "")
                 value = upd.get("value", "")
@@ -1597,11 +1494,7 @@ class Tools:
                 col_str, row_str = m.group(1), m.group(2)
                 col_idx = column_index_from_string(col_str.upper())
                 row_idx = int(row_str)
-                cell = ws.cell(row=row_idx, column=col_idx)
-                if isinstance(cell, MergedCell):
-                    skipped_merged.append(cell_ref)
-                    continue
-                cell.value = value
+                ws.cell(row=row_idx, column=col_idx).value = value
                 count += 1
 
             out = io.BytesIO()
@@ -1611,14 +1504,10 @@ class Tools:
 
             url, name = await self._save_and_link(out.read(), out_name, __request__)
             if url:
-                note = f" Skipped merged (non-anchor) cells: {', '.join(skipped_merged)}." if skipped_merged else ""
-                return f"[{name}]({url})\n\nUpdated {count} cell(s) in {file_type.upper()} file.{note}"
+                return f"[{name}]({url})\n\nUpdated {count} cell(s) in {file_type.upper()} file."
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     # -----------------------------------------------------------------
     # MODIFY ROWS (insert/delete)
@@ -1669,59 +1558,15 @@ class Tools:
             ws = wb[sheet_name] if sheet_name else wb.active
             out_name = output_filename or os.path.splitext(filename)[0] + "_modified.xlsx"
 
-            # openpyxl's insert_rows/delete_rows don't touch existing merged-cell ranges at
-            # all, so a merge below/above the affected rows ends up pointing at the wrong rows
-            # after a shift. Re-anchor ranges that are cleanly above/below the affected rows;
-            # ranges that straddle the affected rows can't be cleanly resized, so drop them
-            # and say so instead of leaving a silently-wrong merge.
-            original_ranges = [str(r) for r in ws.merged_cells.ranges]
-            straddled = []
-
             action_lower = action.strip().lower()
             if action_lower == "insert":
                 ws.insert_rows(idx=row_number, amount=count)
                 msg = f"Inserted {count} row(s) at row {row_number}"
-                for r in original_ranges:
-                    cell_range = openpyxl.worksheet.cell_range.CellRange(r)
-                    if cell_range.min_row >= row_number:
-                        ws.unmerge_cells(r)
-                        ws.merge_cells(
-                            start_row=cell_range.min_row + count, start_column=cell_range.min_col,
-                            end_row=cell_range.max_row + count, end_column=cell_range.max_col,
-                        )
-                    elif cell_range.max_row >= row_number:
-                        straddled.append(r)
             elif action_lower == "delete":
-                # Unlike insert_rows, delete_rows physically relocates cell objects for every
-                # row below the deleted block, which breaks openpyxl's internal merge bookkeeping
-                # for ranges at or below the deleted rows if we try to unmerge them afterwards
-                # (stale-coordinate KeyError). So unmerge everything affected BEFORE deleting,
-                # then re-merge only the below-ranges at their shifted position afterwards.
-                deleted_end = row_number + count - 1
-                below_ranges = []
-                for r in original_ranges:
-                    cell_range = openpyxl.worksheet.cell_range.CellRange(r)
-                    if cell_range.max_row < row_number:
-                        continue  # entirely above the deleted rows, untouched
-                    elif cell_range.min_row > deleted_end:
-                        ws.unmerge_cells(r)
-                        below_ranges.append(cell_range)  # entirely below, re-anchor after delete
-                    else:
-                        # overlaps the deleted rows — can't be cleanly resized
-                        ws.unmerge_cells(r)
-                        straddled.append(r)
                 ws.delete_rows(idx=row_number, amount=count)
                 msg = f"Deleted {count} row(s) starting at row {row_number}"
-                for cell_range in below_ranges:
-                    ws.merge_cells(
-                        start_row=cell_range.min_row - count, start_column=cell_range.min_col,
-                        end_row=cell_range.max_row - count, end_column=cell_range.max_col,
-                    )
             else:
                 return json.dumps({"error": f"Unknown action '{action}'. Use 'insert' or 'delete'."})
-
-            if straddled:
-                msg += f". Warning: {len(straddled)} merged range(s) overlapped the affected rows and could not be cleanly re-anchored ({', '.join(straddled)}) — check the sheet's merges."
 
             out = io.BytesIO()
             wb.save(out)
@@ -1733,10 +1578,7 @@ class Tools:
                 return f"[{name}]({url})\n\n{msg} in {file_type.upper()} file."
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     # -----------------------------------------------------------------
     # PASSWORD PROTECT FILE
@@ -1835,10 +1677,7 @@ class Tools:
                 return f"[{fname}]({url})\n\nPassword-protected {file_type.upper()} file created."
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     # -----------------------------------------------------------------
     # CREATE NEW FILE
@@ -1849,13 +1688,10 @@ class Tools:
         content: str,
         output_filename: str = "",
         raw_text: bool = False,
-        template_file_id: str = "",
-        template_header_row: int = 1,
-        template_data_row: int = 2,
         __user__=None,
         __request__=None,
     ) -> str:
-        """Create a new Office file from scratch, optionally matching an existing file's formatting.
+        """Create a new Office file from scratch.
 
         For xlsx: content is CSV with headers on first line.
         For docx: supports markdown formatting — headings (#, ##, ###), bullets (-, *),
@@ -1867,15 +1703,6 @@ class Tools:
             content: Content specification
             output_filename: Output filename
             raw_text: If True, skip text formatting
-            template_file_id: Optional file_id of an existing file (same type as file_type) whose
-                formatting/styles should be reused for the new file. The template itself is never
-                modified. xlsx: per-column fonts/fills/borders/number formats/merged cells/column
-                widths. docx: the template's styles/theme (headings, fonts, colors). pptx: the
-                template's slide master/theme; new slides use one of its own layouts when possible.
-            template_header_row: xlsx only — template row to copy header styling from (default 1;
-                change if the template's row 1 isn't a real table header, e.g. a title bar).
-            template_data_row: xlsx only — template row to copy data-row styling from (default 2;
-                change if the template's row 2 isn't a real data row, e.g. a metadata row).
         """
         fmt_mode = "preserve" if raw_text else "format"
         try:
@@ -1883,94 +1710,32 @@ class Tools:
             if ftype not in ("xlsx", "docx", "pptx"):
                 return json.dumps({"error": f"Unsupported type: {file_type}. Use xlsx, docx, or pptx."})
 
-            if (template_header_row != 1 or template_data_row != 2) and not template_file_id:
-                return json.dumps({
-                    "error": "template_header_row/template_data_row require template_file_id."
-                })
-
             out_name = output_filename or f"document.{ftype}"
             out = io.BytesIO()
 
             if ftype == "xlsx":
                 import openpyxl
                 from openpyxl.styles import Font, PatternFill, Alignment
-
-                template_bytes = None
-                if template_file_id:
-                    template_bytes = _read_file_bytes(template_file_id)
-                    if template_bytes is None:
-                        return json.dumps({"error": f"Could not read template file {template_file_id}"})
-
-                header_ref = {}
-                data_ref = {}
-                if template_bytes:
-                    wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
-                    ws = wb.active
-
-                    # Reference styles: header row from template_header_row (default: template's
-                    # row 1), data rows from template_data_row (default: template's row 2).
-                    # Defaults suit a simple flat table; override them for templates where those
-                    # rows aren't actually the header/data rows (e.g. a title bar or info row).
-                    if ws.max_row and ws.max_row >= template_header_row:
-                        for cell in ws[template_header_row]:
-                            if cell.has_style:
-                                header_ref[cell.column] = {
-                                    "font": copy(cell.font),
-                                    "fill": copy(cell.fill),
-                                    "border": copy(cell.border),
-                                    "alignment": copy(cell.alignment),
-                                    "number_format": cell.number_format,
-                                }
-                    if ws.max_row and ws.max_row >= template_data_row:
-                        for cell in ws[template_data_row]:
-                            if cell.has_style:
-                                data_ref[cell.column] = {
-                                    "font": copy(cell.font),
-                                    "fill": copy(cell.fill),
-                                    "border": copy(cell.border),
-                                    "alignment": copy(cell.alignment),
-                                    "number_format": cell.number_format,
-                                }
-                    if not data_ref:
-                        data_ref = header_ref
-                else:
-                    wb = openpyxl.Workbook()
-                    ws = wb.active
+                wb = openpyxl.Workbook()
+                ws = wb.active
 
                 import csv as _csv_mod
                 reader = _csv_mod.reader(io.StringIO(content))
                 rows = list(reader)
 
                 if rows:
-                    from openpyxl.cell.cell import MergedCell
-
                     # First row = headers (styled)
                     for j, h in enumerate(rows[0], 1):
-                        c = ws.cell(row=1, column=j)
-                        if isinstance(c, MergedCell):
-                            continue  # non-top-left cell of a merged range in the template, skip
-                        c.value = h.strip()
-                        if j in header_ref:
-                            try:
-                                c.font = copy(header_ref[j]["font"])
-                                c.fill = copy(header_ref[j]["fill"])
-                                c.border = copy(header_ref[j]["border"])
-                                c.alignment = copy(header_ref[j]["alignment"])
-                                c.number_format = header_ref[j]["number_format"]
-                            except Exception:
-                                pass
-                        else:
-                            c.font = Font(bold=True, color="FFFFFF", size=11)
-                            c.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-                            c.alignment = Alignment(horizontal="center")
+                        c = ws.cell(row=1, column=j, value=h.strip())
+                        c.font = Font(bold=True, color="FFFFFF", size=11)
+                        c.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                        c.alignment = Alignment(horizontal="center")
 
                     # Data rows
                     for i, rd in enumerate(rows[1:], 2):
                         for j, v in enumerate(rd, 1):
                             v = v.strip()
                             c = ws.cell(row=i, column=j)
-                            if isinstance(c, MergedCell):
-                                continue  # non-top-left cell of a merged range in the template, skip
                             if v == '':
                                 c.value = None
                             else:
@@ -1986,25 +1751,14 @@ class Tools:
                                             c.value = False
                                         else:
                                             c.value = v
-                            if j in data_ref:
-                                try:
-                                    c.font = copy(data_ref[j]["font"])
-                                    c.fill = copy(data_ref[j]["fill"])
-                                    c.border = copy(data_ref[j]["border"])
-                                    c.alignment = copy(data_ref[j]["alignment"])
-                                    c.number_format = data_ref[j]["number_format"]
-                                except Exception:
-                                    pass
-                            else:
-                                c.alignment = Alignment(
-                                    horizontal="center" if isinstance(c.value, (int, float)) else "left"
-                                )
+                            c.alignment = Alignment(
+                                horizontal="center" if isinstance(c.value, (int, float)) else "left"
+                            )
 
-                    # Auto-fit columns only when there's no template to preserve tuned widths from
-                    if not template_bytes:
-                        for col in ws.columns:
-                            mx = max((len(str(c.value or "")) for c in col), default=5)
-                            ws.column_dimensions[col[0].column_letter].width = min(mx + 3, 50)
+                    # Auto-fit columns
+                    for col in ws.columns:
+                        mx = max((len(str(c.value or "")) for c in col), default=5)
+                        ws.column_dimensions[col[0].column_letter].width = min(mx + 3, 50)
 
                 wb.save(out)
                 wb.close()
@@ -2012,15 +1766,7 @@ class Tools:
             elif ftype == "docx":
                 from docx import Document
                 from docx.shared import Pt, RGBColor
-
-                if template_file_id:
-                    template_bytes = _read_file_bytes(template_file_id)
-                    if template_bytes is None:
-                        return json.dumps({"error": f"Could not read template file {template_file_id}"})
-                    doc = Document(io.BytesIO(template_bytes))
-                else:
-                    doc = Document()
-
+                doc = Document()
                 for raw_line in content.split("\n"):
                     line = raw_line
                     stripped = line.strip()
@@ -2075,21 +1821,9 @@ class Tools:
             elif ftype == "pptx":
                 from pptx import Presentation
                 from pptx.util import Inches
-
-                if template_file_id:
-                    template_bytes = _read_file_bytes(template_file_id)
-                    if template_bytes is None:
-                        return json.dumps({"error": f"Could not read template file {template_file_id}"})
-                    prs = Presentation(io.BytesIO(template_bytes))
-                    # Pick the layout with the fewest placeholders — closest to "blank" for a
-                    # template whose own layout set we don't know in advance, so our manual
-                    # textboxes below don't collide with visible placeholder prompts.
-                    blank_layout = min(prs.slide_layouts, key=lambda l: len(l.placeholders))
-                else:
-                    prs = Presentation()
-                    blank_layout = prs.slide_layouts[6]
-
+                prs = Presentation()
                 slide_specs = re.split(r'\n---\n|\r\n---\r\n|\n---\n', content)
+                blank_layout = prs.slide_layouts[6]
 
                 for spec in slide_specs:
                     spec = spec.strip()
@@ -2127,10 +1861,7 @@ class Tools:
             return json.dumps({"error": "Could not save file"})
 
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
 
 
@@ -2985,10 +2716,7 @@ class Tools:
                 return "Presentation created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def generate_spreadsheet(self, content: str, title: str = "Spreadsheet", theme: str = "professional", raw_text: bool = False, __user__=None, __request__=None) -> str:
         """Generate a professional Excel spreadsheet with modern styling.
@@ -3035,20 +2763,13 @@ class Tools:
             ws = wb.active
             ws.title = title[:31]
 
-            # Parse CSV/tab/semicolon-delimited content. Semicolons are the standard delimiter
-            # for Excel exports in PT/FR/DE locales, so sniff the delimiter instead of assuming
-            # comma — and use csv.reader so quoted fields containing the delimiter parse right.
-            import csv as _csv_mod
-            lines = [l for l in content.split('\n') if l.strip()]
+            # Parse CSV or tab-delimited content
+            lines = [l.strip() for l in content.split('\n') if l.strip()]
             data = []
-            if lines:
-                try:
-                    dialect = _csv_mod.Sniffer().sniff(lines[0], delimiters=",;\t")
-                except _csv_mod.Error:
-                    dialect = _csv_mod.excel
-                    dialect.delimiter = '\t' if '\t' in lines[0] else (';' if ';' in lines[0] else ',')
-                reader = _csv_mod.reader(lines, dialect)
-                data = [[c.strip() for c in row] for row in reader]
+            for line in lines:
+                sep = '\t' if '\t' in line else ','
+                cells = [c.strip().strip('"') for c in line.split(sep)]
+                data.append(cells)
 
             if not data:
                 return json.dumps({"error": "No data provided"})
@@ -3121,10 +2842,7 @@ class Tools:
                 return "Spreadsheet created: [%s](%s)" % (fname, url)
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def tracked_change(self, file_id: str, change_type: str, content: str, author: str = "Reviewer", paragraph_index: int = -1, output_filename: str = "", __user__=None, __request__=None) -> str:
         """Apply tracked changes (redlines) to a Word document with custom author name.
@@ -3134,10 +2852,26 @@ class Tools:
         author: Name shown in Word's Track Changes (e.g., "Sergio Pedro")
         """
         try:
-            data, filename, ftype = self._resolve_file(file_id)
-            if not data:
-                return json.dumps({"error": f"File not found: {file_id}"})
-
+            import sqlite3 as s3
+            conn2 = s3.connect(_DB_PATH)
+            row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
+            if not row:
+                row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
+            if not row:
+                conn2.close()
+                return json.dumps({"error": "File not found"})
+            filename = row[0]
+            meta = json.loads(row[1]) if row[1] else {}
+            fp = meta.get("path", file_id)
+            if not os.path.exists(fp):
+                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
+            if not os.path.exists(fp):
+                conn2.close()
+                return json.dumps({"error": "File not found on disk"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            conn2.close()
+    
             from docx import Document
             from docx_revisions import RevisionParagraph
             doc = Document(io.BytesIO(data))
@@ -3177,25 +2911,33 @@ class Tools:
                 return f"[{name}]({url})\n\nTracked changes by '{author}':\n" + "\n".join(results)
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
 
     async def merge_sheets(self, file_ids: str, output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
-            import openpyxl, io, os
+            import sqlite3 as s3, openpyxl, io, os
             from copy import copy
+            conn2 = s3.connect(_DB_PATH)
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             wb_out = openpyxl.Workbook()
             wb_out.remove(wb_out.active)
             merged = 0
             for fid in ids:
-                file_bytes, filename, ftype = self._resolve_file(fid)
-                if not file_bytes:
+                row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (fid,)).fetchone()
+                if not row:
+                    row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
+                if not row:
                     continue
-                wb_src = openpyxl.load_workbook(io.BytesIO(file_bytes))
+                filename = row[0]
+                meta = json.loads(row[1]) if row[1] else {}
+                fp = meta.get("path", fid)
+                if not os.path.exists(fp):
+                    alt = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
+                    fp = alt if os.path.exists(alt) else ""
+                if not fp or not os.path.exists(fp):
+                    continue
+                wb_src = openpyxl.load_workbook(io.BytesIO(open(fp,"rb").read()))
                 base_name = os.path.splitext(os.path.basename(filename))[0][:15]
                 for sn in wb_src.sheetnames:
                     ws_src = wb_src[sn]
@@ -3212,6 +2954,7 @@ class Tools:
                                 out_cell.number_format = cell.number_format
                     merged += 1
                 wb_src.close()
+            conn2.close()
             if merged == 0:
                 return json.dumps({"error": "No files could be merged"})
             out = io.BytesIO()
@@ -3223,47 +2966,26 @@ class Tools:
                 return f"[{name}]({url})\n\nMerged {merged} sheets from {len(ids)} files."
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def batch_process(self, file_ids: str, operation: str, params: str = "", output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
-            def status(fid, label, result):
-                try:
-                    parsed = json.loads(result)
-                    if isinstance(parsed, dict) and "error" in parsed:
-                        return f"  {fid}: FAILED — {parsed['error']}"
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                return f"  {fid}: {label}"
-
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             results = []
-            failures = 0
             for fid in ids:
                 if operation == "replace":
                     parts = params.split("|||", 1)
                     if len(parts) == 2:
-                        r = await self.replace_text(fid, parts[0], parts[1], "", __user__, __request__)
-                        line = status(fid, "replaced", r)
-                        results.append(line)
-                        if "FAILED" in line: failures += 1
+                        await self.replace_text(fid, parts[0], parts[1], "", __user__, __request__)
+                        results.append(f"  {fid}: replaced")
                 elif operation == "add_rows":
-                    r = await self.add_content(fid, params, "", __user__, __request__)
-                    line = status(fid, "rows added", r)
-                    results.append(line)
-                    if "FAILED" in line: failures += 1
+                    await self.add_content(fid, params, "", __user__, __request__)
+                    results.append(f"  {fid}: rows added")
             if results:
-                summary = f"Batch processed {len(ids)} file(s), {failures} failed:\n" if failures else f"Batch processed {len(ids)} file(s):\n"
-                return summary + "\n".join(results)
+                return "Batch processed " + str(len(ids)) + " files:\n" + "\n".join(results)
             return json.dumps({"error": "No files processed"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def auto_backup(self, __user__=None, __request__=None) -> str:
         try:
@@ -3278,27 +3000,34 @@ class Tools:
             size_kb = os.path.getsize(backup_path) / 1024
             return json.dumps({"success": True, "backup_path": backup_path, "size_kb": round(size_kb,1), "message": f"Backup: {backup_name} ({size_kb:.1f} KB)"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
 
 
     async def merge_pdfs(self, file_ids: str, output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
-            import fitz, io, os
+            import fitz, sqlite3 as s3, io, os
+            conn2 = s3.connect(_DB_PATH)
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             merger = fitz.open()
             count = 0
             for fid in ids:
-                file_bytes, filename, ftype = self._resolve_file(fid)
-                if not file_bytes:
+                row = conn2.execute("SELECT meta FROM file WHERE id=?", (fid,)).fetchone()
+                if not row:
+                    row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
+                if not row:
                     continue
-                src = fitz.open(stream=file_bytes, filetype="pdf")
+                meta = json.loads(row[0]) if row[0] else {}
+                fp = meta.get("path", fid)
+                if not os.path.exists(fp):
+                    fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
+                if not os.path.exists(fp):
+                    continue
+                src = fitz.open(fp)
                 merger.insert_pdf(src)
                 src.close()
                 count += 1
+            conn2.close()
             if count == 0:
                 merger.close()
                 return json.dumps({"error": "No PDFs could be merged"})
@@ -3312,18 +3041,27 @@ class Tools:
                 return f"[{name}]({url})\n\nMerged {count} PDFs into one file."
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def split_pdf(self, file_id: str, pages_per_file: int = 1, output_filename: str = "", __user__=None, __request__=None) -> str:
         try:
-            import fitz, io, os
-            file_bytes, filename, ftype = self._resolve_file(file_id)
-            if not file_bytes:
-                return json.dumps({"error": f"File not found: {file_id}"})
-            src = fitz.open(stream=file_bytes, filetype="pdf")
+            import fitz, sqlite3 as s3, io, os
+            conn2 = s3.connect(_DB_PATH)
+            row = conn2.execute("SELECT meta FROM file WHERE id=?", (file_id,)).fetchone()
+            if not row:
+                row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+file_id+"%",)).fetchone()
+            if not row:
+                conn2.close()
+                return json.dumps({"error": "File not found"})
+            meta = json.loads(row[0]) if row[0] else {}
+            fp = meta.get("path", file_id)
+            if not os.path.exists(fp):
+                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
+            if not os.path.exists(fp):
+                conn2.close()
+                return json.dumps({"error": "File not found on disk"})
+            conn2.close()
+            src = fitz.open(fp)
             total_pages = src.page_count
             urls = []
             for start in range(0, total_pages, pages_per_file):
@@ -3343,10 +3081,7 @@ class Tools:
                 return "Split into " + str(len(urls)) + " files:\n" + "\n".join(urls)
             return json.dumps({"error": "Could not split PDF"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def tool_stats(self, __user__=None, __request__=None) -> str:
         try:
@@ -3367,10 +3102,7 @@ class Tools:
                 "db_size_kb": round(db_size_kb, 1)
             }, indent=2)
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     
 
@@ -3418,11 +3150,24 @@ class Tools:
     async def manage_revisions(self, file_id: str, action: str, output_filename: str = "", __user__=None, __request__=None) -> str:
         """List, accept_all or reject_all tracked changes in a Word document."""
         try:
-            data, filename, ftype = self._resolve_file(file_id)
-            if not data:
-                return json.dumps({"error": f"File not found: {file_id}"})
-
-            from docx_revisions import RevisionDocument, RevisionParagraph
+            import sqlite3 as s3
+            conn2 = s3.connect(_DB_PATH)
+            row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
+            if not row:
+                row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
+            if not row:
+                conn2.close()
+                return json.dumps({"error": "File not found"})
+            filename = row[0]
+            meta = json.loads(row[1]) if row[1] else {}
+            fp = meta.get("path", file_id)
+            if not os.path.exists(fp):
+                fp = os.path.join(_get_owui_data_dir(), "uploads", os.path.basename(fp))
+            with open(fp, "rb") as f:
+                data = f.read()
+            conn2.close()
+    
+            from docx_revisions import RevisionDocument
     
             if action == "list":
                 rdoc = RevisionDocument(io.BytesIO(data))
@@ -3458,148 +3203,63 @@ class Tools:
                 return f"[{name}]({url})\n\n{msg}."
             return json.dumps({"error": "Could not save file"})
         except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+            return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
 
 
     # --- v3.2.0: ODF Write ---
-    async def create_odf(self, content: str, filename: str = "document", format: str = "odt", raw_text: bool = False, template_file_id: str = "", __user__=None, __request__=None) -> str:
-        """Create a new ODF file (.odt, .ods, .odp), optionally matching an existing file's formatting.
+    async def create_odf(self, content: str, filename: str = "document", format: str = "odt", raw_text: bool = False, __user__=None, __request__=None) -> str:
+        """Create a new ODF file (.odt, .ods, .odp).
 
         Args:
             content: Content for the file (CSV for .ods, text for .odt, markdown for .odp)
             filename: Output filename
             format: 'odt', 'ods', or 'odp'
             raw_text: If True, skip text formatting
-            template_file_id: Optional file_id of an existing ODF file (same format) whose styles
-                should be reused. The template itself is never modified. Style reuse here is at
-                the document/style level (inherits the template's default paragraph/cell styles
-                and, for .ods, per-column cell styles from its first rows) rather than a full
-                visual copy — odfpy's API is flatter than openpyxl/python-docx/python-pptx.
         """
-        from odf.opendocument import OpenDocumentText, OpenDocumentSpreadsheet, OpenDocumentPresentation, load
+        from odf.opendocument import OpenDocumentText, OpenDocumentSpreadsheet, OpenDocumentPresentation
         from odf.text import P, H
         from odf.table import Table, TableRow, TableCell
         import io
         fmt_mode = "preserve" if raw_text else "format"
-
+        
         try:
-            template_bytes = None
-            if template_file_id:
-                template_bytes = _read_file_bytes(template_file_id)
-                if template_bytes is None:
-                    return json.dumps({"error": f"Could not read template file {template_file_id}"})
-
             if format == "ods":
-                if template_bytes:
-                    doc = load(io.BytesIO(template_bytes))
-                    tables = doc.getElementsByType(Table)
-                    if tables:
-                        table = tables[0]
-                    else:
-                        table = Table(name="Sheet1")
-                        doc.spreadsheet.addElement(table)
-                    existing_rows = table.getElementsByType(TableRow)
-                    header_styles = [c.getAttribute("stylename") for c in existing_rows[0].getElementsByType(TableCell)] if existing_rows else []
-                else:
-                    doc = OpenDocumentSpreadsheet()
-                    table = Table(name="Sheet1")
-                    doc.spreadsheet.addElement(table)
-                    header_styles = []
-
+                doc = OpenDocumentSpreadsheet()
                 lines = content.split('\n')
+                table = Table(name="Sheet1")
                 for line in lines:
                     line = line.strip()
                     if not line: continue
                     cells = [c.strip() for c in line.split(',')]
                     row = TableRow()
-                    for j, c in enumerate(cells):
-                        style_name = header_styles[j] if j < len(header_styles) else None
-                        cell = TableCell(stylename=style_name) if style_name else TableCell()
+                    for c in cells:
+                        cell = TableCell()
                         cell.addElement(P(text=_format_text(c, mode=fmt_mode)))
                         row.addElement(cell)
                     table.addElement(row)
-
+                doc.spreadsheet.addElement(table)
             elif format == "odp":
-                # NOTE: office:presentation only allows draw:page children (each holding
-                # draw:frame > draw:text-box > text:p) — raw text:p/text:h are not valid here.
-                # This was broken even without a template (any create_odf(..., format="odp")
-                # call raised "IllegalChild: <text:p> is not allowed in <office:presentation>").
-                from odf.draw import Page, Frame, TextBox
-                from odf.style import MasterPage, PageLayout, PageLayoutProperties
-
-                if template_bytes:
-                    doc = load(io.BytesIO(template_bytes))
-                    master_pages = doc.getElementsByType(MasterPage)
-                    master_page = master_pages[0] if master_pages else None
-                else:
-                    doc = OpenDocumentPresentation()
-                    master_page = None
-
-                if master_page is None:
-                    layout = PageLayout(name="PL1")
-                    layout.addElement(PageLayoutProperties(
-                        margin="0cm", pagewidth="28cm", pageheight="15.75cm",
-                        printorientation="landscape",
-                    ))
-                    doc.automaticstyles.addElement(layout)
-                    master_page = MasterPage(name="Default", pagelayoutname=layout)
-                    doc.masterstyles.addElement(master_page)
-
-                slide_specs = re.split(r'\n---\n|\r\n---\r\n|\n---\n', content)
-                for spec in slide_specs:
-                    spec = spec.strip()
-                    if not spec:
-                        continue
-                    lines = spec.split("\n")
-                    title = lines[0].strip()
-                    body_lines = [l.strip() for l in lines[1:] if l.strip()]
-
-                    page = Page(masterpagename=master_page)
-                    doc.presentation.addElement(page)
-
-                    title_frame = Frame(width="25cm", height="2cm", x="1cm", y="1cm")
-                    page.addElement(title_frame)
-                    title_box = TextBox()
-                    title_frame.addElement(title_box)
-                    title_box.addElement(P(text=_format_text(title, mode=fmt_mode)))
-
-                    if body_lines:
-                        body_frame = Frame(width="25cm", height="10cm", x="1cm", y="4cm")
-                        page.addElement(body_frame)
-                        body_box = TextBox()
-                        body_frame.addElement(body_box)
-                        for line in body_lines:
-                            body_box.addElement(P(text=_format_text(line, mode=fmt_mode)))
-
-            else:
-                if template_bytes:
-                    doc = load(io.BytesIO(template_bytes))
-                    existing_p = doc.getElementsByType(P)
-                    existing_h = doc.getElementsByType(H)
-                    p_style = existing_p[-1].getAttribute("stylename") if existing_p else None
-                    h_style = existing_h[-1].getAttribute("stylename") if existing_h else None
-                else:
-                    doc = OpenDocumentText()
-                    p_style = h_style = None
-
+                doc = OpenDocumentPresentation()
                 for line in content.split('\n'):
                     line = line.strip()
                     if not line: continue
                     if line.startswith('# '):
-                        elem = H(outlinelevel=1, text=_format_text(line[2:], mode=fmt_mode))
-                        if h_style: elem.setAttribute("stylename", h_style)
-                    elif line.startswith('## '):
-                        elem = H(outlinelevel=2, text=_format_text(line[3:], mode=fmt_mode))
-                        if h_style: elem.setAttribute("stylename", h_style)
+                        doc.presentation.addElement(H(outlinelevel=1, text=_format_text(line[2:], mode=fmt_mode)))
                     else:
-                        elem = P(text=_format_text(line, mode=fmt_mode))
-                        if p_style: elem.setAttribute("stylename", p_style)
-                    doc.text.addElement(elem)
-
+                        doc.presentation.addElement(P(text=_format_text(line, mode=fmt_mode)))
+            else:
+                doc = OpenDocumentText()
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if not line: continue
+                    if line.startswith('# '):
+                        doc.text.addElement(H(outlinelevel=1, text=_format_text(line[2:], mode=fmt_mode)))
+                    elif line.startswith('## '):
+                        doc.text.addElement(H(outlinelevel=2, text=_format_text(line[3:], mode=fmt_mode)))
+                    else:
+                        doc.text.addElement(P(text=_format_text(line, mode=fmt_mode)))
+            
             buf = io.BytesIO()
             doc.write(buf)
             buf.seek(0)
@@ -3683,70 +3343,49 @@ class Tools:
     # --- v3.2.0: Mail Merge ---
     async def mail_merge(self, template_file_id: str, data_file_id: str, output_prefix: str = "merged", __user__=None, __request__=None) -> str:
         """Generate personalized documents by merging CSV/Excel data into a DOCX template."""
-        try:
-            from docx import Document
-            import io, csv
-
-            t_bytes, t_name, t_type = self._resolve_file(template_file_id)
-            if not t_bytes:
-                return json.dumps({"error": f"Template not found: {template_file_id}"})
-
-            d_bytes, d_name, d_type = self._resolve_file(data_file_id)
-            if not d_bytes:
-                return json.dumps({"error": f"Data file not found: {data_file_id}"})
-
-            rows = []
-            if d_type in ("xlsx", "xls"):
-                import openpyxl
-                wb = openpyxl.load_workbook(io.BytesIO(d_bytes), data_only=True)
-                ws = wb.active
-                headers = [str(c.value or '') for c in ws[1]]
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    rows.append(dict(zip(headers, [str(v or '') for v in row])))
-            else:
-                reader = csv.DictReader(io.StringIO(d_bytes.decode('utf-8')))
-                rows = list(reader)
-
-            if not rows:
-                return json.dumps({"error": "No data rows found"})
-
-            def substitute(paragraph, row):
-                full_text = paragraph.text
-                new_text = full_text
+        from docx import Document
+        import io, csv
+        
+        t_bytes, t_name, t_type = self._resolve_file(template_file_id)
+        if not t_bytes:
+            return json.dumps({"error": f"Template not found: {template_file_id}"})
+        
+        d_bytes, d_name, d_type = self._resolve_file(data_file_id)
+        if not d_bytes:
+            return json.dumps({"error": f"Data file not found: {data_file_id}"})
+        
+        rows = []
+        if d_type in ("xlsx", "xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(d_bytes))
+            ws = wb.active
+            headers = [str(c.value or '') for c in ws[1]]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                rows.append(dict(zip(headers, [str(v or '') for v in row])))
+        else:
+            reader = csv.DictReader(io.StringIO(d_bytes.decode('utf-8')))
+            rows = list(reader)
+        
+        if not rows:
+            return json.dumps({"error": "No data rows found"})
+        
+        results = []
+        for i, row in enumerate(rows):
+            doc = Document(io.BytesIO(t_bytes))
+            for para in doc.paragraphs:
                 for key, value in row.items():
-                    new_text = new_text.replace(f"{{{{{key}}}}}", value)
-                if new_text != full_text:
-                    if paragraph.runs:
-                        paragraph.runs[0].text = new_text
-                        for run in paragraph.runs[1:]:
-                            run.text = ""
-                    else:
-                        paragraph.text = new_text
-
-            results = []
-            for i, row in enumerate(rows):
-                doc = Document(io.BytesIO(t_bytes))
-                for para in doc.paragraphs:
-                    substitute(para, row)
-                for table in doc.tables:
-                    for trow in table.rows:
-                        for cell in trow.cells:
-                            for para in cell.paragraphs:
-                                substitute(para, row)
-                buf = io.BytesIO()
-                doc.save(buf)
-                buf.seek(0)
-                fname = f"{output_prefix}_{i+1}.docx"
-                url, saved = await self._save_and_link(buf.getvalue(), fname, __request__, __user__=__user__)
-                if url:
-                    results.append(f"[{saved}]({url})")
-
-            return f"Merged {len(results)} documents:\n" + "\n".join(results)
-        except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+                    if f"{{{{{key}}}}}" in para.text:
+                        for run in para.runs:
+                            run.text = run.text.replace(f"{{{{{key}}}}}", value)
+            buf = io.BytesIO()
+            doc.save(buf)
+            buf.seek(0)
+            fname = f"{output_prefix}_{i+1}.docx"
+            url, saved = await self._save_and_link(buf.getvalue(), fname, __request__, __user__=__user__)
+            if url:
+                results.append(f"[{saved}]({url})")
+        
+        return f"Merged {len(results)} documents:\n" + "\n".join(results)
 
     # --- v3.2.0: Chart Generation ---
     async def add_chart(self, file_id: str, chart_type: str = "bar", title: str = "Chart", __user__=None, __request__=None) -> str:
@@ -4009,29 +3648,21 @@ class Tools:
         lines_a = text_a.split('\n')
         lines_b = text_b.split('\n')
         
+        result = f"**Comparison: {a_name} vs {b_name}**\n\n"
         added = 0; removed = 0; changed = 0
-        diff_lines = []
         max_len = max(len(lines_a), len(lines_b))
-        max_diff_lines = 100
-
+        
         for i in range(max_len):
             la = lines_a[i] if i < len(lines_a) else None
             lb = lines_b[i] if i < len(lines_b) else None
             if la is None:
-                if len(diff_lines) < max_diff_lines: diff_lines.append(f"+ L{i+1}: {lb}")
-                added += 1
+                result += f"+ L{i+1}: {lb}\n"; added += 1
             elif lb is None:
-                if len(diff_lines) < max_diff_lines: diff_lines.append(f"- L{i+1}: {la}")
-                removed += 1
+                result += f"- L{i+1}: {la}\n"; removed += 1
             elif la != lb:
-                if len(diff_lines) < max_diff_lines: diff_lines.append(f"~ L{i+1}:\n  - {la}\n  + {lb}")
-                changed += 1
-
-        total_diffs = added + removed + changed
-        result = f"**Comparison: {a_name} vs {b_name}**\n\n" + "\n".join(diff_lines)
-        if total_diffs > max_diff_lines:
-            result += f"\n... {total_diffs - max_diff_lines} more difference(s) not shown"
-        result += f"\n\n**Summary:** {added} added, {removed} removed, {changed} changed"
+                result += f"~ L{i+1}:\n  - {la}\n  + {lb}\n"; changed += 1
+        
+        result += f"\n**Summary:** {added} added, {removed} removed, {changed} changed"
         return result
 
     # --- v3.3.0: Export to Markdown ---
@@ -4323,7 +3954,7 @@ class Tools:
                 with open(fpath, 'rb') as f: fb = f.read()
                 if ext == ".xlsx":
                     import openpyxl, io
-                    wb = openpyxl.load_workbook(io.BytesIO(fb), data_only=True)
+                    wb = openpyxl.load_workbook(io.BytesIO(fb))
                     for ws in wb.worksheets:
                         for row in ws.iter_rows(values_only=True):
                             for cell in row:
@@ -4561,88 +4192,23 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     # === v3.6.0: Data Manipulation ===
 
     async def add_pivot_table(self, file_id: str, rows_field: str = "", cols_field: str = "", data_field: str = "", aggregate: str = "sum", __user__=None, __request__=None) -> str:
-        """Create a summary pivot table in Excel (a real cross-tab computed in Python, not a
-        native Excel PivotTable object — openpyxl doesn't support creating those).
-        aggregate: sum, count, average, min, max."""
+        """Create a pivot table in Excel. aggregate: sum, count, average, min, max."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": "File not found"})
         if ftype not in ("xlsx","xls"): return json.dumps({"error": "Pivot tables only for Excel"})
         from openpyxl import load_workbook
-        # Two loads: data_only=True to read displayed values (not formula text) for the
-        # aggregation, and a separate data_only=False copy to add the Pivot sheet to and save —
-        # re-saving a data_only=True workbook strips every formula in the file, not just the
-        # cells we touch, so the two loads must stay separate.
-        wb_read = load_workbook(io.BytesIO(file_bytes), data_only=True)
-        ws = wb_read.active
+        from openpyxl.utils import get_column_letter
         wb = load_workbook(io.BytesIO(file_bytes))
-        headers = [str(c.value or '') for c in ws[1]]
+        ws = wb.active
         if not rows_field:
+            headers = [str(c.value or '') for c in ws[1]]
             return f"**Available fields for pivot:** {', '.join(headers[:10])}\n\nUse: add_pivot_table(file_id, rows_field='FieldName', data_field='FieldName')"
-
-        try:
-            row_idx = headers.index(rows_field)
-        except ValueError:
-            return json.dumps({"error": f"rows_field '{rows_field}' not found. Available: {', '.join(headers)}"})
-        col_idx = headers.index(cols_field) if cols_field and cols_field in headers else None
-        if cols_field and col_idx is None:
-            return json.dumps({"error": f"cols_field '{cols_field}' not found. Available: {', '.join(headers)}"})
-        data_idx = headers.index(data_field) if data_field and data_field in headers else None
-        if data_field and data_idx is None:
-            return json.dumps({"error": f"data_field '{data_field}' not found. Available: {', '.join(headers)}"})
-
-        agg_lower = aggregate.strip().lower()
-        if agg_lower not in ("sum", "count", "average", "min", "max"):
-            return json.dumps({"error": f"Unknown aggregate '{aggregate}'. Use sum, count, average, min, or max."})
-
-        buckets = {}  # (row_key, col_key) -> list of numeric values (or count of rows if no data_field)
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if row_idx >= len(row):
-                continue
-            row_key = row[row_idx]
-            if row_key in (None, ""):
-                continue
-            col_key = row[col_idx] if col_idx is not None and col_idx < len(row) else None
-            key = (row_key, col_key)
-            if data_idx is not None and data_idx < len(row):
-                v = row[data_idx]
-                try:
-                    v = float(v)
-                except (TypeError, ValueError):
-                    continue
-                buckets.setdefault(key, []).append(v)
-            else:
-                buckets.setdefault(key, []).append(1)
-
-        def agg(values):
-            if agg_lower == "sum": return sum(values)
-            if agg_lower == "count": return len(values)
-            if agg_lower == "average": return sum(values) / len(values) if values else 0
-            if agg_lower == "min": return min(values)
-            if agg_lower == "max": return max(values)
-
-        row_keys = sorted({k[0] for k in buckets}, key=str)
+        max_row = ws.max_row; max_col = ws.max_column
+        data_range = f"A1:{get_column_letter(max_col)}{max_row}"
         pivot_ws = wb.create_sheet("Pivot")
-
-        if col_idx is not None:
-            col_keys = sorted({k[1] for k in buckets if k[1] is not None}, key=str)
-            pivot_ws.cell(row=1, column=1, value=rows_field)
-            for j, ck in enumerate(col_keys, 2):
-                pivot_ws.cell(row=1, column=j, value=str(ck))
-            for i, rk in enumerate(row_keys, 2):
-                pivot_ws.cell(row=i, column=1, value=str(rk))
-                for j, ck in enumerate(col_keys, 2):
-                    values = buckets.get((rk, ck), [])
-                    pivot_ws.cell(row=i, column=j, value=agg(values) if values else None)
-        else:
-            pivot_ws.cell(row=1, column=1, value=rows_field)
-            pivot_ws.cell(row=1, column=2, value=f"{agg_lower}({data_field or 'count'})")
-            for i, rk in enumerate(row_keys, 2):
-                values = buckets.get((rk, None), [])
-                pivot_ws.cell(row=i, column=1, value=str(rk))
-                pivot_ws.cell(row=i, column=2, value=agg(values) if values else None)
-
-        result = f"Pivot table created in sheet 'Pivot' ({len(row_keys)} row groups). Fields: rows={rows_field}, cols={cols_field or '(none)'}, data={data_field or '(row count)'}, aggregate={aggregate}"
+        pivot_ws.title = "Pivot"
+        result = f"Pivot table created in sheet 'Pivot'. Fields: rows={rows_field}, data={data_field}, aggregate={aggregate}"
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
         if url: return f"{result}: [{fname}]({url})"
@@ -4867,53 +4433,8 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return json.dumps({"error": f"Unknown action: {action}"})
 
     async def document_assembly(self, template_name: str, data_file_id: str, output_prefix: str = "assembled", __user__=None, __request__=None) -> str:
-        """Assemble multiple documents from a saved template (see save_template/use_template)
-        and a data file (CSV/Excel), one generated document per data row. {key} placeholders in
-        the template are replaced with each row's matching column value.
-
-        Note: this looks up template_name in the saved-templates store (self.valves.templates),
-        NOT an uploaded file_id — for merging into a real uploaded DOCX template with its own
-        formatting, use mail_merge(template_file_id=..., data_file_id=...) instead.
-        """
-        try:
-            templates = json.loads(self.valves.templates or "{}")
-            if template_name not in templates:
-                return json.dumps({"error": f"Template '{template_name}' not found. Available: {', '.join(templates.keys())}"})
-            template_content = templates[template_name]
-
-            d_bytes, d_name, d_type = self._resolve_file(data_file_id)
-            if not d_bytes:
-                return json.dumps({"error": f"Data file not found: {data_file_id}"})
-
-            rows = []
-            if d_type in ("xlsx", "xls"):
-                import openpyxl
-                wb = openpyxl.load_workbook(io.BytesIO(d_bytes), data_only=True)
-                ws = wb.active
-                headers = [str(c.value or '') for c in ws[1]]
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    rows.append(dict(zip(headers, [str(v or '') for v in row])))
-            else:
-                import csv
-                reader = csv.DictReader(io.StringIO(d_bytes.decode('utf-8')))
-                rows = list(reader)
-
-            if not rows:
-                return json.dumps({"error": "No data rows found"})
-
-            results = []
-            for i, row in enumerate(rows):
-                content = template_content
-                for key, value in row.items():
-                    content = content.replace(f"{{{key}}}", value)
-                result = await self.generate_document(content, f"{output_prefix}_{i+1}", __user__=__user__, __request__=__request__)
-                results.append(result)
-            return f"Assembled {len(results)} documents:\n" + "\n".join(results)
-        except Exception as e:
-            err = {"error": str(e)}
-            if self.valves.debug_errors:
-                err["traceback"] = traceback.format_exc()
-            return json.dumps(err)
+        """Assemble multiple documents from a template and data source."""
+        return await self.mail_merge(template_name, data_file_id, output_prefix, __user__=__user__, __request__=__request__)
 
     async def conditional_format(self, file_id: str, rules: str, __user__=None, __request__=None) -> str:
         """Apply conditional formatting rules to Excel. rules: 'col:A,op:>,val:100,color:27AE60;col:B,op:<,val:0,color:E74C3C'."""
@@ -4962,10 +4483,10 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         from lxml import etree
         import datetime
         doc = Document(io.BytesIO(file_bytes))
-        para = next((p for p in doc.paragraphs if p.runs), None)
-        if not para:
-            return json.dumps({"error": "Document has no paragraph with text to anchor a comment to"})
-        doc.add_comment(para.runs, text=_format_text(text, mode="format"), author=author)
+        if doc.paragraphs:
+            para = doc.paragraphs[0]
+            comment = doc.add_comment(_format_text(text, mode="format"), author=author)
+            para.add_comment(comment)
         buf = io.BytesIO(); doc.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
         if url: return f"Comment added by {author}: [{fname}]({url})"
@@ -5035,23 +4556,18 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                     data = data[int(key)]
         if not isinstance(data, list):
             data = [data] if isinstance(data, dict) else [{"value": str(data)}]
-        if data and not isinstance(data[0], dict):
-            # list of scalars (strings/numbers) rather than objects — wrap so we still get a
-            # real column instead of silently writing nothing while claiming success below
-            data = [{"value": str(item)} for item in data]
-        if not data:
-            return json.dumps({"error": "API response contained no records to import"})
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
         wb = Workbook(); ws = wb.active
-        headers = list(data[0].keys())
-        for j, h in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=j, value=h)
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-        for i, item in enumerate(data, 2):
-            for j, key in enumerate(headers, 1):
-                ws.cell(row=i, column=j, value=str(item.get(key, "")))
+        if data and isinstance(data[0], dict):
+            headers = list(data[0].keys())
+            for j, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=j, value=h)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            for i, item in enumerate(data, 2):
+                for j, key in enumerate(headers, 1):
+                    ws.cell(row=i, column=j, value=str(item.get(key, "")))
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url_out, fname = await self._save_and_link(buf.getvalue(), f"{output_filename}.xlsx", __request__)
         if url_out: return f"Imported {len(data)} records from API: [{fname}]({url_out})"
