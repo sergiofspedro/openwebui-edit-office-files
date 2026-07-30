@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.10.0
+version: 3.10.1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -2482,7 +2482,7 @@ class Tools:
         tcPr.append(shd)
         p = cell.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(40); p.paragraph_format.space_after = Pt(8)
-        run = p.add_run(_format_text(title, mode=fmt_mode))
+        run = p.add_run(title)
         run.font.size = Pt(28); run.font.bold = True
         run.font.color.rgb = RGBColor(255, 255, 255); run.font.name = font_pair["heading"]
         p2 = cell.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -3053,20 +3053,20 @@ class Tools:
         try:
             import sqlite3 as s3
             conn2 = s3.connect(_DB_PATH)
-            row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
-            if not row:
-                row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
-            if not row:
+            try:
+                row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
+                if not row:
+                    row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
+                if not row:
+                    return json.dumps({"error": "File not found"})
+                filename = row[0]
+                meta = json.loads(row[1]) if row[1] else {}
+                data = _read_file_bytes(meta.get("path", file_id))
+                if not data:
+                    return json.dumps({"error": "File not found on disk"})
+            finally:
                 conn2.close()
-                return json.dumps({"error": "File not found"})
-            filename = row[0]
-            meta = json.loads(row[1]) if row[1] else {}
-            data = _read_file_bytes(meta.get("path", file_id))
-            if not data:
-                conn2.close()
-                return json.dumps({"error": "File not found on disk"})
-            conn2.close()
-    
+
             from docx import Document
             from docx_revisions import RevisionParagraph
             doc = Document(io.BytesIO(data))
@@ -3114,39 +3114,41 @@ class Tools:
             import sqlite3 as s3, openpyxl, io, os
             from copy import copy
             conn2 = s3.connect(_DB_PATH)
-            ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
-            wb_out = openpyxl.Workbook()
-            wb_out.remove(wb_out.active)
-            merged = 0
-            for fid in ids:
-                row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (fid,)).fetchone()
-                if not row:
-                    row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
-                if not row:
-                    continue
-                filename = row[0]
-                meta = json.loads(row[1]) if row[1] else {}
-                data = _read_file_bytes(meta.get("path", fid))
-                if not data:
-                    continue
-                wb_src = openpyxl.load_workbook(io.BytesIO(data))
-                base_name = os.path.splitext(os.path.basename(filename))[0][:15]
-                for sn in wb_src.sheetnames:
-                    ws_src = wb_src[sn]
-                    sheet_name = (base_name + "_" + sn)[:31]
-                    ws_out = wb_out.create_sheet(title=sheet_name)
-                    for ri, row_data in enumerate(ws_src.iter_rows(), 1):
-                        for ci, cell in enumerate(row_data, 1):
-                            out_cell = ws_out.cell(row=ri, column=ci, value=cell.value)
-                            if cell.has_style:
-                                out_cell.font = copy(cell.font)
-                                out_cell.fill = copy(cell.fill)
-                                out_cell.border = copy(cell.border)
-                                out_cell.alignment = copy(cell.alignment)
-                                out_cell.number_format = cell.number_format
-                    merged += 1
-                wb_src.close()
-            conn2.close()
+            try:
+                ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
+                wb_out = openpyxl.Workbook()
+                wb_out.remove(wb_out.active)
+                merged = 0
+                for fid in ids:
+                    row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (fid,)).fetchone()
+                    if not row:
+                        row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
+                    if not row:
+                        continue
+                    filename = row[0]
+                    meta = json.loads(row[1]) if row[1] else {}
+                    data = _read_file_bytes(meta.get("path", fid))
+                    if not data:
+                        continue
+                    wb_src = openpyxl.load_workbook(io.BytesIO(data))
+                    base_name = os.path.splitext(os.path.basename(filename))[0][:15]
+                    for sn in wb_src.sheetnames:
+                        ws_src = wb_src[sn]
+                        sheet_name = (base_name + "_" + sn)[:31]
+                        ws_out = wb_out.create_sheet(title=sheet_name)
+                        for ri, row_data in enumerate(ws_src.iter_rows(), 1):
+                            for ci, cell in enumerate(row_data, 1):
+                                out_cell = ws_out.cell(row=ri, column=ci, value=cell.value)
+                                if cell.has_style:
+                                    out_cell.font = copy(cell.font)
+                                    out_cell.fill = copy(cell.fill)
+                                    out_cell.border = copy(cell.border)
+                                    out_cell.alignment = copy(cell.alignment)
+                                    out_cell.number_format = cell.number_format
+                        merged += 1
+                    wb_src.close()
+            finally:
+                conn2.close()
             if merged == 0:
                 return json.dumps({"error": "No files could be merged"})
             out = io.BytesIO()
@@ -3202,24 +3204,26 @@ class Tools:
         try:
             import fitz, sqlite3 as s3, io, os
             conn2 = s3.connect(_DB_PATH)
-            ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
-            merger = fitz.open()
-            count = 0
-            for fid in ids:
-                row = conn2.execute("SELECT meta FROM file WHERE id=?", (fid,)).fetchone()
-                if not row:
-                    row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
-                if not row:
-                    continue
-                meta = json.loads(row[0]) if row[0] else {}
-                data = _read_file_bytes(meta.get("path", fid))
-                if not data:
-                    continue
-                src = fitz.open(stream=data, filetype="pdf")
-                merger.insert_pdf(src)
-                src.close()
-                count += 1
-            conn2.close()
+            try:
+                ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
+                merger = fitz.open()
+                count = 0
+                for fid in ids:
+                    row = conn2.execute("SELECT meta FROM file WHERE id=?", (fid,)).fetchone()
+                    if not row:
+                        row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
+                    if not row:
+                        continue
+                    meta = json.loads(row[0]) if row[0] else {}
+                    data = _read_file_bytes(meta.get("path", fid))
+                    if not data:
+                        continue
+                    src = fitz.open(stream=data, filetype="pdf")
+                    merger.insert_pdf(src)
+                    src.close()
+                    count += 1
+            finally:
+                conn2.close()
             if count == 0:
                 merger.close()
                 return json.dumps({"error": "No PDFs could be merged"})
@@ -3239,17 +3243,18 @@ class Tools:
         try:
             import fitz, sqlite3 as s3, io, os
             conn2 = s3.connect(_DB_PATH)
-            row = conn2.execute("SELECT meta FROM file WHERE id=?", (file_id,)).fetchone()
-            if not row:
-                row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+file_id+"%",)).fetchone()
-            if not row:
+            try:
+                row = conn2.execute("SELECT meta FROM file WHERE id=?", (file_id,)).fetchone()
+                if not row:
+                    row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+file_id+"%",)).fetchone()
+                if not row:
+                    return json.dumps({"error": "File not found"})
+                meta = json.loads(row[0]) if row[0] else {}
+                data = _read_file_bytes(meta.get("path", file_id))
+                if not data:
+                    return json.dumps({"error": "File not found on disk"})
+            finally:
                 conn2.close()
-                return json.dumps({"error": "File not found"})
-            meta = json.loads(row[0]) if row[0] else {}
-            data = _read_file_bytes(meta.get("path", file_id))
-            if not data:
-                conn2.close()
-                return json.dumps({"error": "File not found on disk"})
             src = fitz.open(stream=data, filetype="pdf")
             total_pages = src.page_count
             urls = []
@@ -3277,18 +3282,23 @@ class Tools:
             import sqlite3 as s3
             conn2 = s3.connect(_DB_PATH)
             try:
-                tool_count = conn2.execute("SELECT COUNT(*) FROM tool WHERE is_active=1").fetchone()[0]
-            except Exception:
-                tool_count = 0
-            try:
-                func_count = conn2.execute("SELECT COUNT(*) FROM function WHERE is_active=1").fetchone()[0]
-            except Exception:
-                func_count = 0
-            model_count = conn2.execute("SELECT COUNT(*) FROM model WHERE is_active=1").fetchone()[0]
-            exports_dir = os.path.join(os.path.expanduser("~"), "open-webui", "exports")
-            export_count = len([f for f in os.listdir(exports_dir) if os.path.isfile(os.path.join(exports_dir, f))]) if os.path.exists(exports_dir) else 0
-            db_size_kb = os.path.getsize(_DB_PATH) / 1024
-            conn2.close()
+                try:
+                    tool_count = conn2.execute("SELECT COUNT(*) FROM tool WHERE is_active=1").fetchone()[0]
+                except Exception:
+                    tool_count = 0
+                try:
+                    func_count = conn2.execute("SELECT COUNT(*) FROM function WHERE is_active=1").fetchone()[0]
+                except Exception:
+                    func_count = 0
+                try:
+                    model_count = conn2.execute("SELECT COUNT(*) FROM model WHERE is_active=1").fetchone()[0]
+                except Exception:
+                    model_count = 0
+                exports_dir = os.path.join(_get_owui_data_dir(), "exports")
+                export_count = len([f for f in os.listdir(exports_dir) if os.path.isfile(os.path.join(exports_dir, f))]) if os.path.exists(exports_dir) else 0
+                db_size_kb = os.path.getsize(_DB_PATH) / 1024
+            finally:
+                conn2.close()
             return json.dumps({
                 "tools": tool_count,
                 "functions": func_count,
@@ -3348,20 +3358,20 @@ class Tools:
         try:
             import sqlite3 as s3
             conn2 = s3.connect(_DB_PATH)
-            row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
-            if not row:
-                row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
-            if not row:
+            try:
+                row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
+                if not row:
+                    row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
+                if not row:
+                    return json.dumps({"error": "File not found"})
+                filename = row[0]
+                meta = json.loads(row[1]) if row[1] else {}
+                data = _read_file_bytes(meta.get("path", file_id))
+                if not data:
+                    return json.dumps({"error": "File not found on disk"})
+            finally:
                 conn2.close()
-                return json.dumps({"error": "File not found"})
-            filename = row[0]
-            meta = json.loads(row[1]) if row[1] else {}
-            data = _read_file_bytes(meta.get("path", file_id))
-            if not data:
-                conn2.close()
-                return json.dumps({"error": "File not found on disk"})
-            conn2.close()
-    
+
             from docx_revisions import RevisionDocument
     
             if action == "list":
@@ -3651,7 +3661,7 @@ class Tools:
                 pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
                 for page in pdf_doc:
                     rect = page.rect
-                    page.insert_text((rect.width/2-100, rect.height/2), _format_text(text, mode="format"), fontsize=72, color=(0.5,0.5,0.5), alpha=0.1, rotate=45)
+                    page.insert_text((rect.width/2-100, rect.height/2), text, fontsize=72, color=(0.5,0.5,0.5), alpha=0.1, rotate=45)
                 buf = io.BytesIO()
                 pdf_doc.save(buf)
                 pdf_doc.close()
