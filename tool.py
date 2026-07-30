@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.3
+version: 3.9.4
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -276,16 +276,21 @@ def _format_text(text: str, mode: str = "format") -> str:
         text = pattern.sub(placeholder, text)
         acronym_map[placeholder] = acro
     
-    # Common abbreviations that should NOT end a sentence (lowercase with period)
-    _ABBREV = {'Dr', 'Mr', 'Mrs', 'Ms', 'Prof', 'Sr', 'Jr', 'St', 'vs', 'etc',
-               'e.g', 'i.e', 'a.m', 'p.m', 'approx', 'dept', 'est', 'inc', 'ltd',
-               'co', 'corp', 'vol', 'ed', 'fig', 'no', 'nos', 'p', 'pp', 'ch', 'sec',
-               'Jan', 'Feb', 'Mar', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-               'U.S', 'U.K', 'E.U', 'Ph.D', 'M.D', 'B.A', 'M.A', 'B.S', 'M.S'}
+    # Smart sentence splitting: avoid splitting on abbreviations
+    # Heuristic 1: A word containing an internal period (e.g., "U.S.A.", "e.g.", "i.e.", "Ph.D.")
+    #              is an abbreviation — don't split after it (handles U.S.A., U.K., E.U., a.k.a., w.r.t., etc.)
+    # Mini-list: short common abbreviations without internal periods (Dr., Mr., St., etc.)
+    # Note: month abbreviations (Jan, Feb, etc.) are included since they're commonly followed by
+    # a number (e.g., "Jan 15") which would pass the sentence-split check.
+    _MINI_ABBREV = {'Dr', 'Mr', 'Mrs', 'Ms', 'Prof', 'Sr', 'Jr', 'St', 'vs', 'etc',
+                    'Jan', 'Feb', 'Mar', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'}
 
-    # Build negative lookbehind for abbreviations
-    _abbrev_pattern = '|'.join(_re.escape(a) for a in sorted(_ABBREV, key=len, reverse=True))
-    _sentence_re = _re.compile(r'(?<!\b(?:' + _abbrev_pattern + r'))(?<=[.!?])\s+')
+    _abbrev_pattern = '|'.join(_re.escape(a) for a in sorted(_MINI_ABBREV, key=len, reverse=True))
+    _sentence_re = _re.compile(
+        r'(?<!\b(?:' + _abbrev_pattern + r'))'   # not after mini-abbrev
+        r'(?<!\.[A-Za-z])'                         # not after word with internal period
+        r'(?<=[.!?])\s+'                            # after .!? + space
+    )
     sentences = _sentence_re.split(text)
 
     # Sentence case with intentional capitalization preservation
@@ -1387,19 +1392,15 @@ class Tools:
 
                 for para in doc.paragraphs:
                     if find_text in para.text:
-                        # Preserve formatting: replace in runs
-                        full_text = para.text
-                        if find_text in full_text:
-                            new_text = full_text.replace(find_text, replace_with)
-                            # Clear all runs and set new text in first run
-                            if para.runs:
-                                para.runs[0].text = new_text
-                                for run in para.runs[1:]:
-                                    run.text = ""
-                                count += 1
-                            else:
-                                para.text = new_text
-                                count += 1
+                        if para.runs:
+                            # Preserve formatting: replace within each run individually
+                            for run in para.runs:
+                                if find_text in run.text:
+                                    run.text = run.text.replace(find_text, replace_with)
+                            count += 1
+                        else:
+                            para.text = para.text.replace(find_text, replace_with)
+                            count += 1
 
                 # Also replace in tables
                 for table in doc.tables:
@@ -1409,12 +1410,13 @@ class Tools:
                                 for para in cell.paragraphs:
                                     if find_text in para.text:
                                         if para.runs:
-                                            para.runs[0].text = para.text.replace(find_text, replace_with)
-                                            for run in para.runs[1:]:
-                                                run.text = ""
+                                            for run in para.runs:
+                                                if find_text in run.text:
+                                                    run.text = run.text.replace(find_text, replace_with)
+                                            count += 1
                                         else:
                                             para.text = para.text.replace(find_text, replace_with)
-                                        count += 1
+                                            count += 1
 
                 doc.save(out)
 
