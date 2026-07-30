@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|---|
+| **v3.9.4** | Bug fixes: replace_text preserves DOCX formatting, smarter abbreviation detection without huge list |
 | **v3.9.2** | Bug fixes: RGBColor crash in create_file, abbreviation handling in _format_text, URL parentheses in link parser, link label extraction |
 | **v3.9.1** | Smart capitalization preservation — proper nouns, product names, "I", mixed-case words (PhD, SharePoint) now preserved in body text |
 | **v3.9.0** | `template_file_id` now works for all 6 creatable formats (docx, pptx, odt, ods, odp — not just xlsx). Fixed ~19 real bugs, including 27 functions that were guaranteed to crash on first use (`_save_and_link`/`_read_xxx` issues), `create_odf(format="odp")` being completely broken, and merged-cell crashes. Added a `debug_errors` valve and response caps/truncation to keep normal-operation output shorter. Removed the unmaintained `src/` module split — `tool.py` is now the single source of truth. See CHANGELOG.md for the full list. |
