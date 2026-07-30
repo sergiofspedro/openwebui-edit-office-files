@@ -8,6 +8,13 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|---|
+| **v3.10.1** | 6 bug fixes: cover title case, PDF watermark, tool_stats resilience, SQLite connection leaks |
+| **v3.10.0** | 6 bug fixes: SQLite connection leaks, timeline detection, step guide threshold, file URL pattern valve, data column preview |
+| **v3.9.9** | 6 bug fixes: PDF detection, document_assembly template, path traversal error handling, progress emitter, add_comment crash, dead tuple |
+| **v3.9.8** | 6 bug fixes: PPTX replace_text formatting, add_content markdown, base64 fallback limit, CSV dedup, SHA1→SHA256 |
+| **v3.9.7** | 6 bug fixes: path traversal guard, spreadsheet headers, pull quote precedence, file read security, HTML export, watermark header |
+| **v3.9.6** | 6 bug fixes: real headings in _add_rich_paragraph, MD in tables/badges/KPIs, pivot table creation, batch_process errors, backup path, tool_stats resilience |
+| **v3.9.5** | 9 bug fixes: double formatting, ODF headings, metadata, _save_and_link __user__, missing _read_* methods, comments, user_id |
 | **v3.9.4** | Bug fixes: replace_text preserves DOCX formatting, smarter abbreviation detection without huge list |
 | **v3.9.2** | Bug fixes: RGBColor crash in create_file, abbreviation handling in _format_text, URL parentheses in link parser, link label extraction |
 | **v3.9.1** | Smart capitalization preservation — proper nouns, product names, "I", mixed-case words (PhD, SharePoint) now preserved in body text |
@@ -119,6 +126,27 @@ All `generate_document`, `generate_slides`, `generate_spreadsheet`, `create_file
 
 - **`raw_text=True`** — skip all auto-formatting (sentence case, em dash replacement) and keep your text exactly as written
 - Existing document edits (`add_content`, `replace_text`) always preserve original formatting
+
+### Bug Fixes (v3.9.5–v3.10.1)
+
+**56 bugs fixed** across 7 incremental releases — every release hardened a specific area:
+
+| Release | Fixes |
+|---|---|
+| **v3.10.1** | Cover title case, PDF watermark, tool_stats resilience, SQLite connection leaks |
+| **v3.10.0** | SQLite connection leaks, timeline detection, step guide threshold, file URL pattern valve, data column preview |
+| **v3.9.9** | PDF detection, document_assembly template, path traversal error handling, progress emitter, add_comment crash, dead tuple |
+| **v3.9.8** | PPTX replace_text formatting, add_content markdown, base64 fallback limit, CSV dedup, SHA1→SHA256 |
+| **v3.9.7** | Path traversal guard, spreadsheet headers, pull quote precedence, file read security, HTML export, watermark header |
+| **v3.9.6** | Real headings in _add_rich_paragraph, MD in tables/badges/KPIs, pivot table creation, batch_process errors, backup path, tool_stats resilience |
+| **v3.9.5** | Double formatting, ODF headings, metadata, _save_and_link __user__, missing _read_* methods, comments, user_id |
+
+Key improvements across this cycle:
+- **Security** — Path traversal guards on file operations, SHA1→SHA256 migration, protected file URL pattern
+- **Stability** — SQLite connection leaks eliminated, tool_stats crash resistance, dead tuple prevention
+- **Formatting fidelity** — Cover/title case preservation, real heading styles in rich paragraphs, markdown rendering inside tables, badges, and KPIs
+- **Cross-format** — ODF heading support, PDF detection/watermark, PPTX replace_text formatting preservation, base64 memory limit safety
+- **Dev UX** — Progress emitter for long ops, `debug_errors` valve now includes file URL pattern, backup path resolution
 
 ### Bug Fixes (v3.7.2)
 
