@@ -285,16 +285,48 @@ def _format_text(text: str, mode: str = "format") -> str:
         text = pattern.sub(placeholder, text)
         acronym_map[placeholder] = acro
     
-    # Sentence case
+    # Sentence case with intentional capitalization preservation
+    # Rule: words with ANY uppercase letter are preserved as-is (proper nouns,
+    # acronyms not in the list, product names, the pronoun "I", etc.).
+    # Words that are entirely lowercase get sentence-cased.
     sentences = _re.split(r'(?<=[.!?])\s+', text)
     formatted_sentences = []
     for s in sentences:
         s = s.strip()
         if not s:
             continue
-        s = s.lower()
+        
+        # Split into words while preserving spacing
+        words = s.split(' ')
+        formatted_words = []
+        
+        for word in words:
+            if not word:
+                formatted_words.append(word)
+                continue
+            
+            # Skip placeholder-protected acronyms (they start with \x00)
+            if '\x00' in word:
+                formatted_words.append(word)
+                continue
+            
+            # Check if word has intentional capitalization
+            # (any uppercase letter means the user intentionally capitalized it)
+            has_uppercase = any(c.isupper() for c in word)
+            
+            if has_uppercase:
+                # Preserve original capitalization
+                formatted_words.append(word)
+            else:
+                # Safe to lowercase
+                formatted_words.append(word.lower())
+        
+        s = ' '.join(formatted_words)
+        
+        # Capitalize first letter of the first word in the sentence
         if s and s[0].isalpha():
             s = s[0].upper() + s[1:]
+        
         formatted_sentences.append(s)
     
     text = ' '.join(formatted_sentences)
