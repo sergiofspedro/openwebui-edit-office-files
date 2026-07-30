@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.9
+version: 3.10.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -80,10 +80,12 @@ def _resolve_file_path(file_id: str) -> Optional[str]:
     """Resolve an Open WebUI file UUID to an absolute disk path."""
     try:
         conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-        row = conn.execute(
-            "SELECT path FROM file WHERE id = ?", (file_id,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT path FROM file WHERE id = ?", (file_id,)
+            ).fetchone()
+        finally:
+            conn.close()
     except Exception as exc:
         print(f"[office] DB lookup failed for {file_id}: {exc}", file=sys.stderr)
         return None
@@ -92,11 +94,13 @@ def _resolve_file_path(file_id: str) -> Optional[str]:
         # Fallback: try by filename
         try:
             conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-            row = conn.execute(
-                "SELECT path FROM file WHERE filename LIKE ?",
-                (f"%{file_id}%",),
-            ).fetchone()
-            conn.close()
+            try:
+                row = conn.execute(
+                    "SELECT path FROM file WHERE filename LIKE ?",
+                    (f"%{file_id}%",),
+                ).fetchone()
+            finally:
+                conn.close()
         except Exception:
             pass
 
@@ -734,6 +738,10 @@ class Tools:
             default=None,
             description="Override the base URL for download links. Auto-detected from X-Original-Host header or WEBUI_URL env var if unset.",
         )
+        file_url_pattern: Optional[str] = Field(
+            default=None,
+            description="Custom file download URL pattern. Use {file_id} placeholder. Examples: /api/v1/files/{file_id}/content (default), /api/files/{file_id}. If unset, uses standard Open WebUI URL.",
+        )
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
         language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
@@ -868,31 +876,50 @@ class Tools:
             file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
             now = int(_time.time())
 
+            # Generate a preview for the data column
+            try:
+                if content_type.startswith("text/") or ext in (".csv", ".md", ".txt"):
+                    preview = file_bytes.decode('utf-8', errors='replace')[:500]
+                elif ext in (".xlsx", ".xls"):
+                    preview = f"[Excel spreadsheet: {len(file_bytes)} bytes]"
+                elif ext in (".docx",):
+                    preview = f"[Word document: {len(file_bytes)} bytes]"
+                elif ext in (".pptx",):
+                    preview = f"[PowerPoint presentation: {len(file_bytes)} bytes]"
+                elif ext in (".pdf",):
+                    preview = f"[PDF document: {len(file_bytes)} bytes]"
+                else:
+                    preview = f"[File: {len(file_bytes)} bytes]"
+            except Exception:
+                preview = "{}"
+
             conn = sqlite3.connect(_DB_PATH)
-            conn.execute(
-                """INSERT OR REPLACE INTO file
-                   (id, user_id, hash, filename, path, data, meta, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    file_id,
-                    __user__.get("id", "") if __user__ and isinstance(__user__, dict) else "",
-                    file_hash,
-                    _encode_filename(filename),
-                    os.path.join(_UPLOAD_DIR, file_id),
-                    "{}",
-                    json.dumps({
-                        "name": filename,
-                        "content_type": content_type,
-                        "size": len(file_bytes),
-                        "source": "office-plugin",
-                        "generated": True,
-                    }),
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute(
+                    """INSERT OR REPLACE INTO file
+                       (id, user_id, hash, filename, path, data, meta, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        file_id,
+                        __user__.get("id", "") if __user__ and isinstance(__user__, dict) else "",
+                        file_hash,
+                        _encode_filename(filename),
+                        os.path.join(_UPLOAD_DIR, file_id),
+                        preview,
+                        json.dumps({
+                            "name": filename,
+                            "content_type": content_type,
+                            "size": len(file_bytes),
+                            "source": "office-plugin",
+                            "generated": True,
+                        }),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
             base_url = self.valves.base_url
             if not base_url and __request__:
@@ -906,7 +933,12 @@ class Tools:
                 base_url = os.environ.get("WEBUI_URL", "http://localhost:3000")
             base_url = base_url.rstrip("/")
 
-            url = f"{base_url}/api/v1/files/{file_id}/content"
+            # Standard Open WebUI file download URL (works for most versions)
+            # Customize via file_url_pattern valve if needed
+            if self.valves.file_url_pattern:
+                url = f"{base_url}{self.valves.file_url_pattern.replace('{file_id}', file_id)}"
+            else:
+                url = f"{base_url}/api/v1/files/{file_id}/content"
             return (url, filename)
 
         except Exception as e:
@@ -2473,6 +2505,7 @@ class Tools:
         in_comparison = False; comp_headers = []; comp_rows = []
         in_progress = False; progress_data = []
         in_code_block = False; code_lines = []
+        _timeline_re = _re.compile(r'^(\d{4}|\d{1,2}[/-]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)\s*[-:]\s*(.+)$', _re.IGNORECASE)
         
         for line in lines:
             line = line.strip()
@@ -2484,7 +2517,11 @@ class Tools:
                     add_card_box(doc, card_lines, colors["accent"], colors["light"], card_icon, card_title)
                     card_lines = []; in_card = False
                 if in_steps:
-                    add_step_guide(doc, step_lines)
+                    if len(step_lines) >= 3:
+                        add_step_guide(doc, step_lines)
+                    else:
+                        for i, step_text in enumerate(step_lines, 1):
+                            _add_rich_paragraph(doc, f"{i}. {_format_text(step_text, mode=fmt_mode)}", font_name=font_pair["body"], font_size=11, color=colors["text"])
                     step_lines = []; in_steps = False
                 if in_timeline:
                     add_timeline(doc, timeline_data)
@@ -2577,7 +2614,7 @@ class Tools:
                 doc.add_paragraph()
                 kpi_data = []; in_kpi = False
             
-            # Timeline: 📅 2024 | Event description
+            # Timeline: 📅 2024 | Event description (pipe format)
             if '|' in line and _re.match(r'^[\U0001F300-\U0001F9FF\s]*\d{4}', line) and not in_card and not in_kpi and not in_steps and not in_quote and not in_comparison and not in_progress:
                 in_timeline = True
                 parts = [p.strip() for p in line.split('|', 1)]
@@ -2591,6 +2628,14 @@ class Tools:
                 add_timeline(doc, timeline_data)
                 timeline_data = []; in_timeline = False
             
+            # Timeline (colon/dash format): 2024 - Event or Jan 15: Event
+            if not in_timeline and not in_card and not in_kpi and not in_steps and not in_quote and not in_comparison and not in_progress:
+                tl_m = _timeline_re.match(line)
+                if tl_m:
+                    in_timeline = True
+                    timeline_data.append((tl_m.group(1), tl_m.group(2)))
+                    continue
+            
             # Steps: 1. Step one / 2. Step two
             if _re.match(r'^\d+\.\s', line) and not in_card and not in_kpi and not in_timeline and not in_quote and not in_comparison and not in_progress:
                 in_steps = True
@@ -2600,9 +2645,13 @@ class Tools:
                 step_lines.append(_re.sub(r'^\d+\.\s', '', line))
                 continue
             elif in_steps:
-                add_step_guide(doc, step_lines)
+                if len(step_lines) >= 3:
+                    add_step_guide(doc, step_lines)
+                else:
+                    for i, step_text in enumerate(step_lines, 1):
+                        _add_rich_paragraph(doc, f"{i}. {_format_text(step_text, mode=fmt_mode)}", font_name=font_pair["body"], font_size=11, color=colors["text"])
                 step_lines = []; in_steps = False
-            
+
             # Pull quote: "Quote text" — Author
             if line.startswith('"') and line.endswith('"') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_comparison and not in_progress:
                 in_quote = True
@@ -2703,7 +2752,11 @@ class Tools:
         if in_card:
             add_card_box(doc, card_lines, colors["accent"], colors["light"], card_icon, card_title)
         if in_steps:
-            add_step_guide(doc, step_lines)
+            if len(step_lines) >= 3:
+                add_step_guide(doc, step_lines)
+            else:
+                for i, step_text in enumerate(step_lines, 1):
+                    _add_rich_paragraph(doc, f"{i}. {_format_text(step_text, mode=fmt_mode)}", font_name=font_pair["body"], font_size=11, color=colors["text"])
         if in_timeline:
             add_timeline(doc, timeline_data)
         if in_comparison:
@@ -3255,30 +3308,31 @@ class Tools:
         cutoff = int(_time.time()) - (days_old * 86400)
         
         conn = sqlite3.connect(_DB_PATH)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, filename, created_at FROM file WHERE meta LIKE '%office-plugin%' AND created_at < ?",
-            (cutoff,)
-        ).fetchall()
-        
-        if not rows:
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, filename, created_at FROM file WHERE meta LIKE '%office-plugin%' AND created_at < ?",
+                (cutoff,)
+            ).fetchall()
+            
+            if not rows:
+                return f"No office-generated files older than {days_old} days found."
+            
+            deleted = []
+            errors = []
+            for row in rows:
+                try:
+                    fpath = os.path.join(_UPLOAD_DIR, row["id"])
+                    if os.path.exists(fpath):
+                        os.remove(fpath)
+                    conn.execute("DELETE FROM file WHERE id = ?", (row["id"],))
+                    deleted.append(row["filename"])
+                except Exception as e:
+                    errors.append(f"{row['filename']}: {e}")
+            
+            conn.commit()
+        finally:
             conn.close()
-            return f"No office-generated files older than {days_old} days found."
-        
-        deleted = []
-        errors = []
-        for row in rows:
-            try:
-                fpath = os.path.join(_UPLOAD_DIR, row["id"])
-                if os.path.exists(fpath):
-                    os.remove(fpath)
-                conn.execute("DELETE FROM file WHERE id = ?", (row["id"],))
-                deleted.append(row["filename"])
-            except Exception as e:
-                errors.append(f"{row['filename']}: {e}")
-        
-        conn.commit()
-        conn.close()
         
         result = f"Cleaned up {len(deleted)} file(s) older than {days_old} days:\n"
         for f in deleted:
@@ -4412,13 +4466,14 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     async def sql_to_spreadsheet(self, query: str, output_filename: str = "query_results", __user__=None, __request__=None) -> str:
         """Execute a SQL query on the local SQLite database and export results to Excel."""
         import io
+        conn2 = sqlite3.connect(_DB_PATH)
         try:
-            conn2 = sqlite3.connect(_DB_PATH)
             conn2.row_factory = sqlite3.Row
             rows = conn2.execute(query).fetchall()
-            conn2.close()
         except Exception as e:
             return json.dumps({"error": f"SQL error: {str(e)}"})
+        finally:
+            conn2.close()
         if not rows: return "Query returned no results."
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -4566,23 +4621,23 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         """View or manage the audit trail of document operations."""
         import time as _time
         conn2 = sqlite3.connect(_DB_PATH)
-        conn2.row_factory = sqlite3.Row
-        if action == "list":
-            rows = conn2.execute("SELECT filename, created_at FROM file WHERE meta LIKE '%office-plugin%' ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        try:
+            conn2.row_factory = sqlite3.Row
+            if action == "list":
+                rows = conn2.execute("SELECT filename, created_at FROM file WHERE meta LIKE '%office-plugin%' ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+                if not rows: return "No audit records found."
+                result = f"**Audit Trail (last {len(rows)}):**\n"
+                for r in rows:
+                    ts = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(r["created_at"])) if r["created_at"] else "unknown"
+                    result += f"- {ts}: {r['filename']}\n"
+                return result
+            elif action == "stats":
+                total = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%'").fetchone()[0]
+                today = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%' AND date(created_at, 'unixepoch') = date('now')").fetchone()[0]
+                return f"**Audit Stats:**\n- Total files: {total}\n- Today: {today}"
+            return json.dumps({"error": f"Unknown action: {action}. Use: list, stats"})
+        finally:
             conn2.close()
-            if not rows: return "No audit records found."
-            result = f"**Audit Trail (last {len(rows)}):**\n"
-            for r in rows:
-                ts = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(r["created_at"])) if r["created_at"] else "unknown"
-                result += f"- {ts}: {r['filename']}\n"
-            return result
-        elif action == "stats":
-            total = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%'").fetchone()[0]
-            today = conn2.execute("SELECT COUNT(*) FROM file WHERE meta LIKE '%office-plugin%' AND date(created_at, 'unixepoch') = date('now')").fetchone()[0]
-            conn2.close()
-            return f"**Audit Stats:**\n- Total files: {total}\n- Today: {today}"
-        conn2.close()
-        return json.dumps({"error": f"Unknown action: {action}. Use: list, stats"})
 
     async def retention_policy(self, policy: str = "view", days: int = 90, file_type: str = "all") -> str:
         """Manage document retention policies. policy: view, set, apply."""
