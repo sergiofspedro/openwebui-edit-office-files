@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.8
+version: 3.9.9
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -144,8 +144,9 @@ def _read_file_bytes(file_id: str) -> Optional[bytes]:
         if not _allowed:
             print(f"[office] Path traversal blocked: {path}", file=sys.stderr)
             return None
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[office] Path traversal check failed for {path}: {exc}", file=sys.stderr)
+        return None
     try:
         with open(path, "rb") as fh:
             return fh.read()
@@ -175,6 +176,8 @@ def _detect_type(filename: str) -> str:
         return "odp"
     if ext in (".csv",):
         return "csv"
+    if ext in (".pdf",):
+        return "pdf"
     return "unknown"
 
 
@@ -218,7 +221,6 @@ def _xls_to_xlsx(xls_data: bytes) -> bytes:
                 # xlrd date handling: if cell type is XL_CELL_DATE, convert
                 if cell.ctype == xlrd.XL_CELL_DATE:
                     try:
-                        dt_tuple = xls_book.datemode, int(value)
                         import datetime as _dt
                         value = _dt.datetime(*xlrd.xldate_as_tuple(value, xls_book.datemode))
                     except Exception:
@@ -3757,8 +3759,10 @@ class Tools:
         return json.dumps({"error": f"Image {shape_index} not found. Found {pic_count} images."})
 
     # --- v3.2.0: Progress Indicators ---
-    async def _progress(self, current: int, total: int, operation: str = "Processing") -> None:
+    async def _progress(self, current: int, total: int, operation: str = "Processing", __event_emitter__=None) -> None:
         """Emit progress via __event_emitter__ if available."""
+        if __event_emitter__ is None:
+            return
         try:
             await __event_emitter__({"type": "status", "data": {"description": f"{operation}: {current}/{total}", "done": current >= total}})
         except Exception:
@@ -4625,7 +4629,44 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
     async def document_assembly(self, template_name: str, data_file_id: str, output_prefix: str = "assembled", __user__=None, __request__=None) -> str:
         """Assemble multiple documents from a template and data source."""
-        return await self.mail_merge(template_name, data_file_id, output_prefix, __user__=__user__, __request__=__request__)
+        # Load template content
+        templates = json.loads(self.valves.templates or "{}")
+        if template_name not in templates:
+            return f"Template '{template_name}' not found. Available: {', '.join(templates.keys())}"
+        template_content = templates[template_name]
+        
+        # Load data
+        d_bytes, d_name, d_type = self._resolve_file(data_file_id)
+        if not d_bytes:
+            return json.dumps({"error": f"Data file not found: {data_file_id}"})
+        
+        # Parse data rows
+        import csv as _csv, io
+        rows = []
+        if d_type in ("xlsx", "xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(d_bytes))
+            ws = wb.active
+            headers = [str(c.value or '') for c in ws[1]]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                rows.append(dict(zip(headers, [str(v or '') for v in row])))
+        else:
+            reader = _csv.DictReader(io.StringIO(d_bytes.decode('utf-8')))
+            rows = list(reader)
+        
+        if not rows:
+            return json.dumps({"error": "No data rows found"})
+        
+        # Generate one document per data row
+        results = []
+        for i, row in enumerate(rows):
+            content = template_content
+            for key, value in row.items():
+                content = content.replace(f"{{{key}}}", str(value))
+            result = await self.generate_document(content, f"{output_prefix}_{i+1}", __user__=__user__, __request__=__request__)
+            results.append(result)
+        
+        return f"Assembled {len(results)} documents from template '{template_name}'."
 
     async def conditional_format(self, file_id: str, rules: str, __user__=None, __request__=None) -> str:
         """Apply conditional formatting rules to Excel. rules: 'col:A,op:>,val:100,color:27AE60;col:B,op:<,val:0,color:E74C3C'."""
@@ -4663,24 +4704,27 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
     # === v3.6.0: Collaboration Features ===
 
-    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", __user__=None, __request__=None) -> str:
+    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, __user__=None, __request__=None) -> str:
         """Add a review comment to a Word document."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": "File not found"})
         if ftype != "docx": return json.dumps({"error": "Comments only supported for DOCX"})
         from docx import Document
-        from docx.oxml.ns import qn
-        from lxml import etree
-        import datetime
         doc = Document(io.BytesIO(file_bytes))
-        if doc.paragraphs:
-            para = doc.paragraphs[0]
-            comment = doc.add_comment(text, author=author)
-            para.add_comment(comment)
+        
+        # Ensure we have a paragraph to comment on
+        if not doc.paragraphs:
+            doc.add_paragraph("")
+        if paragraph_index >= len(doc.paragraphs):
+            paragraph_index = 0
+        para = doc.paragraphs[paragraph_index]
+        
+        comment = doc.add_comment(text, author=author)
+        para.add_comment(comment)
         buf = io.BytesIO(); doc.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
-        if url: return f"Comment added by {author}: [{fname}]({url})"
+        if url: return f"Comment added by {author} on paragraph {paragraph_index}: [{fname}]({url})"
         return json.dumps({"error": "Could not save file"})
 
     async def version_diff(self, file_id: str, version_label: str = "") -> str:
