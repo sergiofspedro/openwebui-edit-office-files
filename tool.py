@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.9.5
+version: 3.9.6
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -666,15 +666,26 @@ def _add_professional_table(doc, rows, colors, hex_to_rgb, fmt_mode="format"):
         for j, cell_text in enumerate(row_data):
             if j < num_cols:
                 cell = table.rows[i].cells[j]
-                cell.text = _format_text(cell_text, mode=fmt_mode)
-                for paragraph in cell.paragraphs:
-                    paragraph.paragraph_format.space_before = Pt(2)
-                    paragraph.paragraph_format.space_after = Pt(2)
-                    for run in paragraph.runs:
-                        run.font.size = Pt(10)
-                        run.font.name = 'Calibri'
-                        if i == 0:
-                            run.font.bold = True
+                cell.text = ''
+                p = cell.paragraphs[0]
+                p.paragraph_format.space_before = Pt(2)
+                p.paragraph_format.space_after = Pt(2)
+                segments = _parse_inline_md(_format_text(cell_text, mode=fmt_mode))
+                for seg_text, fmt in segments:
+                    if not seg_text:
+                        continue
+                    run = p.add_run(seg_text)
+                    run.font.size = Pt(10)
+                    run.font.name = 'Calibri'
+                    if i == 0:
+                        run.font.bold = True
+                    if fmt.get('bold'):
+                        run.font.bold = True
+                    if fmt.get('italic'):
+                        run.font.italic = True
+                    if fmt.get('code'):
+                        run.font.name = "Consolas"
+                        run.font.size = Pt(9)
 
     doc.add_paragraph()
 
@@ -2084,9 +2095,22 @@ class Tools:
             run.font.color.rgb = hex_to_rgb(color_hex); run.font.name = font_pair["heading"]
             p2 = cell.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p2.paragraph_format.space_after = Pt(12)
-            run2 = p2.add_run(_format_text(label, mode=fmt_mode))
-            run2.font.size = Pt(9); run2.font.color.rgb = hex_to_rgb(colors["text"])
-            run2.font.name = font_pair["body"]
+            label_text = _format_text(label, mode=fmt_mode)
+            label_segments = _parse_inline_md(label_text)
+            for seg_text, fmt in label_segments:
+                if not seg_text:
+                    continue
+                run2 = p2.add_run(seg_text)
+                run2.font.size = Pt(9)
+                run2.font.color.rgb = hex_to_rgb(colors["text"])
+                run2.font.name = font_pair["body"]
+                if fmt.get('bold'):
+                    run2.font.bold = True
+                if fmt.get('italic'):
+                    run2.font.italic = True
+                if fmt.get('code'):
+                    run2.font.name = "Consolas"
+                    run2.font.size = Pt(9)
         
         def add_progress_bar(doc, label, percentage, color_hex):
             p = doc.add_paragraph()
@@ -2228,10 +2252,19 @@ class Tools:
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
             for j, h in enumerate(headers):
                 cell = table.rows[0].cells[j]
-                cell.text = _format_text(h, mode=fmt_mode)
-                for p in cell.paragraphs:
-                    for r in p.runs:
-                        r.font.size = Pt(10); r.font.bold = True; r.font.name = font_pair["heading"]
+                cell.text = ''
+                p = cell.paragraphs[0]
+                segments = _parse_inline_md(_format_text(h, mode=fmt_mode))
+                for seg_text, fmt in segments:
+                    if not seg_text:
+                        continue
+                    r = p.add_run(seg_text)
+                    r.font.size = Pt(10); r.font.bold = True; r.font.name = font_pair["heading"]
+                    if fmt.get('italic'):
+                        r.font.italic = True
+                    if fmt.get('code'):
+                        r.font.name = "Consolas"
+                        r.font.size = Pt(9)
             for i, row in enumerate(rows):
                 for j, val in enumerate(row):
                     if j < len(headers):
@@ -2240,10 +2273,21 @@ class Tools:
                         if val.lower() in ("yes","true","sim","si","oui","ja"): display = "\u2705 " + val
                         elif val.lower() in ("no","false","nao","non","nein"): display = "\u274c " + val
                         elif val.lower() in ("partial","maybe","talvez"): display = "\u26a0\ufe0f " + val
-                        cell.text = _format_text(display, mode=fmt_mode)
-                        for p in cell.paragraphs:
-                            for r in p.runs:
-                                r.font.size = Pt(10); r.font.name = font_pair["body"]
+                        cell.text = ''
+                        p = cell.paragraphs[0]
+                        segments = _parse_inline_md(_format_text(display, mode=fmt_mode))
+                        for seg_text, fmt in segments:
+                            if not seg_text:
+                                continue
+                            r = p.add_run(seg_text)
+                            r.font.size = Pt(10); r.font.name = font_pair["body"]
+                            if fmt.get('bold'):
+                                r.font.bold = True
+                            if fmt.get('italic'):
+                                r.font.italic = True
+                            if fmt.get('code'):
+                                r.font.name = "Consolas"
+                                r.font.size = Pt(9)
             doc.add_paragraph()
         
         def add_timeline(doc, events):
@@ -2335,7 +2379,16 @@ class Tools:
         def _add_rich_paragraph(doc, text, style=None, font_name="Calibri", font_size=11, color=None):
             """Add a paragraph with rich formatting from inline markdown parsing."""
             segments = _parse_inline_md(text)
-            p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+            if style and style.startswith('Heading'):
+                try:
+                    level = int(style.split()[-1])
+                except (ValueError, IndexError):
+                    level = 1
+                p = doc.add_heading('', level=level)
+                for run in p.runs:
+                    run.text = ''
+            else:
+                p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
             for seg_text, fmt in segments:
                 if not seg_text:
                     continue
@@ -3061,9 +3114,11 @@ class Tools:
                 elif operation == "add_rows":
                     await self.add_content(fid, params, "", __user__, __request__)
                     results.append(f"  {fid}: rows added")
+                else:
+                    results.append(f"  {fid}: unsupported operation '{operation}'")
             if results:
                 return "Batch processed " + str(len(ids)) + " files:\n" + "\n".join(results)
-            return json.dumps({"error": "No files processed"})
+            return json.dumps({"error": f"No files processed. Unsupported operation: {operation}"})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3071,7 +3126,7 @@ class Tools:
         try:
             import shutil, datetime
             db_path = _DB_PATH
-            backup_dir = os.path.join(os.path.expanduser("~"), "open-webui", "backups")
+            backup_dir = os.path.join(_get_owui_data_dir(), "backups")
             os.makedirs(backup_dir, exist_ok=True)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"webui_backup_{timestamp}.db"
@@ -3167,8 +3222,14 @@ class Tools:
         try:
             import sqlite3 as s3
             conn2 = s3.connect(_DB_PATH)
-            tool_count = conn2.execute("SELECT COUNT(*) FROM tool WHERE is_active=1").fetchone()[0]
-            func_count = conn2.execute("SELECT COUNT(*) FROM function WHERE is_active=1").fetchone()[0]
+            try:
+                tool_count = conn2.execute("SELECT COUNT(*) FROM tool WHERE is_active=1").fetchone()[0]
+            except Exception:
+                tool_count = 0
+            try:
+                func_count = conn2.execute("SELECT COUNT(*) FROM function WHERE is_active=1").fetchone()[0]
+            except Exception:
+                func_count = 0
             model_count = conn2.execute("SELECT COUNT(*) FROM model WHERE is_active=1").fetchone()[0]
             exports_dir = os.path.join(os.path.expanduser("~"), "open-webui", "exports")
             export_count = len([f for f in os.listdir(exports_dir) if os.path.isfile(os.path.join(exports_dir, f))]) if os.path.exists(exports_dir) else 0
@@ -4274,6 +4335,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     async def add_pivot_table(self, file_id: str, rows_field: str = "", cols_field: str = "", data_field: str = "", aggregate: str = "sum", __user__=None, __request__=None) -> str:
         """Create a pivot table in Excel. aggregate: sum, count, average, min, max."""
         import io
+        from collections import defaultdict
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": "File not found"})
         if ftype not in ("xlsx","xls"): return json.dumps({"error": "Pivot tables only for Excel"})
@@ -4281,14 +4343,57 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         from openpyxl.utils import get_column_letter
         wb = load_workbook(io.BytesIO(file_bytes))
         ws = wb.active
+        headers = [str(c.value or '') for c in ws[1]]
         if not rows_field:
-            headers = [str(c.value or '') for c in ws[1]]
             return f"**Available fields for pivot:** {', '.join(headers[:10])}\n\nUse: add_pivot_table(file_id, rows_field='FieldName', data_field='FieldName')"
-        max_row = ws.max_row; max_col = ws.max_column
-        data_range = f"A1:{get_column_letter(max_col)}{max_row}"
+        # Find column indices
+        try:
+            row_idx = headers.index(rows_field)
+        except ValueError:
+            return json.dumps({"error": f"Field '{rows_field}' not found in headers: {headers[:20]}"})
+        data_idx = None
+        if data_field:
+            try:
+                data_idx = headers.index(data_field)
+            except ValueError:
+                return json.dumps({"error": f"Field '{data_field}' not found in headers: {headers[:20]}"})
+        # Read and aggregate data
+        agg_map = defaultdict(list)
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            row_key = str(row[row_idx]) if row[row_idx] is not None else "(blank)"
+            if data_idx is not None and row[data_idx] is not None:
+                try:
+                    agg_map[row_key].append(float(row[data_idx]))
+                except (ValueError, TypeError):
+                    agg_map[row_key].append(0.0)
+            elif data_idx is None:
+                agg_map[row_key].append(1)  # count mode
+        # Compute aggregate
         pivot_ws = wb.create_sheet("Pivot")
         pivot_ws.title = "Pivot"
-        result = f"Pivot table created in sheet 'Pivot'. Fields: rows={rows_field}, data={data_field}, aggregate={aggregate}"
+        agg_name = aggregate.lower()
+        if agg_name == "count":
+            pivot_ws.cell(row=1, column=1, value=rows_field)
+            pivot_ws.cell(row=1, column=2, value="Count")
+            for r, (key, vals) in enumerate(sorted(agg_map.items()), 2):
+                pivot_ws.cell(row=r, column=1, value=key)
+                pivot_ws.cell(row=r, column=2, value=len(vals))
+        else:
+            pivot_ws.cell(row=1, column=1, value=rows_field)
+            pivot_ws.cell(row=1, column=2, value=f"{agg_name} of {data_field}")
+            for r, (key, vals) in enumerate(sorted(agg_map.items()), 2):
+                pivot_ws.cell(row=r, column=1, value=key)
+                if agg_name == "sum":
+                    pivot_ws.cell(row=r, column=2, value=sum(vals))
+                elif agg_name == "average" or agg_name == "avg":
+                    pivot_ws.cell(row=r, column=2, value=sum(vals) / len(vals) if vals else 0)
+                elif agg_name == "min":
+                    pivot_ws.cell(row=r, column=2, value=min(vals) if vals else 0)
+                elif agg_name == "max":
+                    pivot_ws.cell(row=r, column=2, value=max(vals) if vals else 0)
+                else:
+                    pivot_ws.cell(row=r, column=2, value=sum(vals))
+        result = f"Pivot table created in sheet 'Pivot' ({len(agg_map)} rows). Fields: rows={rows_field}, data={data_field}, aggregate={aggregate}"
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
         if url: return f"{result}: [{fname}]({url})"
