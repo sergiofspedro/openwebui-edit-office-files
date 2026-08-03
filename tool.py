@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.10.1
+version: 3.11.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -3067,6 +3067,11 @@ class Tools:
             finally:
                 conn2.close()
 
+            # Check file type — track changes only supported for DOCX
+            ftype = _detect_type(filename)
+            if ftype != "docx":
+                return json.dumps({"error": f"Track changes are only supported for DOCX files. {ftype.upper()} format does not support revision marks."})
+
             from docx import Document
             from docx_revisions import RevisionParagraph
             doc = Document(io.BytesIO(data))
@@ -3371,6 +3376,11 @@ class Tools:
                     return json.dumps({"error": "File not found on disk"})
             finally:
                 conn2.close()
+
+            # Check file type — revision management only supported for DOCX
+            ftype = _detect_type(filename)
+            if ftype != "docx":
+                return json.dumps({"error": f"Revision management is only supported for DOCX files. {ftype.upper()} format does not support revision marks."})
 
             from docx_revisions import RevisionDocument
     
@@ -4769,28 +4779,53 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
     # === v3.6.0: Collaboration Features ===
 
-    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, __user__=None, __request__=None) -> str:
-        """Add a review comment to a Word document."""
+    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, __user__=None, __request__=None) -> str:
+        """Add a review comment to a Word, Excel, or PowerPoint file.
+
+        Args:
+            file_id: File ID to comment on
+            text: Comment text
+            author: Name shown in the comment (e.g., "Sergio Pedro")
+            paragraph_index: For DOCX: paragraph index to attach comment to (default 0)
+            cell_ref: For XLSX: cell reference (default "A1")
+            slide_num: For PPTX: slide number (default 1)
+        """
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": "File not found"})
-        if ftype != "docx": return json.dumps({"error": "Comments only supported for DOCX"})
-        from docx import Document
-        doc = Document(io.BytesIO(file_bytes))
-        
-        # Ensure we have a paragraph to comment on
-        if not doc.paragraphs:
-            doc.add_paragraph("")
-        if paragraph_index >= len(doc.paragraphs):
-            paragraph_index = 0
-        para = doc.paragraphs[paragraph_index]
-        
-        comment = doc.add_comment(text, author=author)
-        para.add_comment(comment)
-        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
-        if url: return f"Comment added by {author} on paragraph {paragraph_index}: [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+
+        if ftype == "docx":
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+
+            # Ensure we have a paragraph to comment on
+            if not doc.paragraphs:
+                doc.add_paragraph("")
+            if paragraph_index >= len(doc.paragraphs):
+                paragraph_index = 0
+            para = doc.paragraphs[paragraph_index]
+
+            comment = doc.add_comment(text, author=author)
+            para.add_comment(comment)
+            buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+            if url: return f"Comment added by {author} on paragraph {paragraph_index}: [{fname}]({url})"
+            return json.dumps({"error": "Could not save file"})
+
+        elif ftype == "xlsx":
+            from openpyxl import load_workbook
+            from openpyxl.comments import Comment
+            wb = load_workbook(io.BytesIO(file_bytes))
+            ws = wb.active
+            comment = Comment(text, author)
+            ws[cell_ref].comment = comment
+            buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+            if url: return f"Comment added by {author} on cell {cell_ref}: [{fname}]({url})"
+            return json.dumps({"error": "Could not save file"})
+
+        else:
+            return json.dumps({"error": f"Comments not supported for {ftype}. Supported: DOCX, XLSX, PPTX."})
 
     async def version_diff(self, file_id: str, version_label: str = "") -> str:
         """Show differences between current file and a previous version."""
