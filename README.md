@@ -7,7 +7,8 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 ## What's New
 
 | Version | Feature |
-|---|---|---|
+|---|---|
+| **v3.11.0** | Comments in Excel (openpyxl) and PowerPoint (lxml XML) with author name, clear track changes errors for unsupported formats |
 | **v3.10.1** | 6 bug fixes: cover title case, PDF watermark, tool_stats resilience, SQLite connection leaks |
 | **v3.10.0** | 6 bug fixes: SQLite connection leaks, timeline detection, step guide threshold, file URL pattern valve, data column preview |
 | **v3.9.9** | 6 bug fixes: PDF detection, document_assembly template, path traversal error handling, progress emitter, add_comment crash, dead tuple |
