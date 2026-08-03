@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.1] - 2026-08-03
+
+### Added
+- **`add_comment()` for PPTX is now fully implemented** — writes modern PowerPoint comments
+  via lxml (`ppt/comments/commentModern{n}.xml` + `ppt/commentsAuthors.xml`) with author names,
+  correcting the premature v3.11.0 claim where the PPTX block was missing from the released file.
+  The Excel comments and track-changes error handling from v3.11.0 remain unchanged.
+
 ## [3.9.2] - 2026-07-30
 
 ### Fixed

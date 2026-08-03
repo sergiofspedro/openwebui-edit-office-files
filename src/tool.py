@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.11.0
+version: 3.11.1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -4823,6 +4823,188 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
             if url: return f"Comment added by {author} on cell {cell_ref}: [{fname}]({url})"
             return json.dumps({"error": "Could not save file"})
+
+        elif ftype == "pptx":
+            try:
+                import zipfile
+                import uuid as _uuid
+                from datetime import datetime, timezone
+                from lxml import etree
+
+                _P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+                _P14_NS = "http://schemas.microsoft.com/office/powerpoint/2010/main"
+                _R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                _PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+                _CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+                _CM_REL_TYPE = "http://schemas.microsoft.com/office/2016/09/relationships/commentsModern"
+                _CT_MODERN = "application/vnd.ms-office.presentation.commentsModern"
+                _CT_AUTHORS = "application/vnd.ms-office.presentation.commentsAuthors"
+
+                slide_name = "ppt/slides/slide%d.xml" % slide_num
+                rels_name = "ppt/slides/_rels/slide%d.xml.rels" % slide_num
+                modern_name = "ppt/comments/commentModern%d.xml" % slide_num
+                authors_name = "ppt/commentsAuthors.xml"
+
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                    entries = {name: z.read(name) for name in z.namelist()}
+
+                if slide_name not in entries:
+                    return json.dumps({"error": "Slide %d not found in presentation" % slide_num})
+
+                etree.register_namespace("p", _P_NS)
+                etree.register_namespace("p14", _P14_NS)
+                etree.register_namespace("r", _R_NS)
+
+                utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")
+                para_guid = "{" + str(_uuid.uuid4()).upper() + "}"
+
+                # --- modern comment part: compute next comment idx ---
+                if modern_name in entries:
+                    mroot = etree.fromstring(entries[modern_name])
+                    max_idx = 0
+                    for el in mroot:
+                        if el.tag == "{%s}cm" % _P_NS:
+                            try:
+                                max_idx = max(max_idx, int(el.get("idx") or 0))
+                            except (TypeError, ValueError):
+                                pass
+                    next_idx = max_idx + 1
+                else:
+                    mroot = etree.Element("{%s}cmLst" % _P_NS)
+                    next_idx = 1
+
+                # --- commentsAuthors part: resolve or create author id ---
+                if authors_name in entries:
+                    aroot = etree.fromstring(entries[authors_name])
+                else:
+                    aroot = etree.Element("{%s}cmAuthorLst" % _P14_NS)
+
+                author_id = None
+                existing_ids = []
+                author_els = []
+                for el in aroot:
+                    if el.tag == "{%s}cmAuthor" % _P14_NS:
+                        author_els.append(el)
+                        try:
+                            existing_ids.append(int(el.get("id") or 0))
+                        except (TypeError, ValueError):
+                            existing_ids.append(0)
+                        if el.get("name") == author:
+                            author_id = el.get("id")
+
+                if author_id is not None:
+                    for el in author_els:
+                        if el.get("name") == author:
+                            el.set("lastIdx", str(next_idx))
+                            break
+                else:
+                    new_id = (max(existing_ids) + 1) if existing_ids else 0
+                    initials = "".join(w[0] for w in re.split(r"[\s._\-]+", author.strip()) if w)[:4].upper() or "AU"
+                    new_author = etree.SubElement(aroot, "{%s}cmAuthor" % _P14_NS)
+                    new_author.set("id", str(new_id))
+                    new_author.set("name", author)
+                    new_author.set("initials", initials)
+                    new_author.set("lastIdx", "1")
+                    new_author.set("clrIndex", str(len(author_els) % 14))
+                    author_id = str(new_id)
+
+                # --- append modern comment ---
+                cm = etree.SubElement(mroot, "{%s}cm" % _P_NS)
+                cm.set("authorId", author_id)
+                cm.set("dt", utc_now)
+                cm.set("idx", str(next_idx))
+                pos = etree.SubElement(cm, "{%s}pos" % _P_NS)
+                pos.set("x", "100")
+                pos.set("y", "100")
+                cm_txt = etree.SubElement(cm, "{%s}text" % _P_NS)
+                cm_txt.text = text
+                cm_extLst = etree.SubElement(cm, "{%s}extLst" % _P_NS)
+                cm_ext = etree.SubElement(cm_extLst, "{%s}ext" % _P_NS)
+                cm_ext.set("uri", "{D6B160D4-4F5E-48AF-9E34-8E18A86A1F0A}")
+                comment_ex = etree.SubElement(cm_ext, "{%s}commentEx" % _P14_NS)
+                comment_ex.set("paraId", para_guid)
+                comment_ex.set("dt", utc_now)
+                comment_ex.set("parentIdx", "0")
+                ce_txt = etree.SubElement(comment_ex, "{%s}text" % _P14_NS)
+                ce_txt.text = text
+                ce_author = etree.SubElement(comment_ex, "{%s}authorId" % _P14_NS)
+                ce_author.text = author_id
+
+                # --- [Content_Types].xml: add overrides if missing ---
+                ct_root = etree.fromstring(entries["[Content_Types].xml"])
+                has_authors_ct = any(
+                    el.tag == "{%s}Override" % _CT_NS and el.get("PartName") == "/ppt/commentsAuthors.xml"
+                    for el in ct_root
+                )
+                if not has_authors_ct:
+                    o = etree.SubElement(ct_root, "{%s}Override" % _CT_NS)
+                    o.set("PartName", "/ppt/commentsAuthors.xml")
+                    o.set("ContentType", _CT_AUTHORS)
+                has_modern_ct = any(
+                    el.tag == "{%s}Override" % _CT_NS and el.get("PartName") == "/ppt/comments/commentModern%d.xml" % slide_num
+                    for el in ct_root
+                )
+                if not has_modern_ct:
+                    o = etree.SubElement(ct_root, "{%s}Override" % _CT_NS)
+                    o.set("PartName", "/ppt/comments/commentModern%d.xml" % slide_num)
+                    o.set("ContentType", _CT_MODERN)
+
+                # --- slide rels: add commentsModern relationship ---
+                if rels_name in entries:
+                    rroot = etree.fromstring(entries[rels_name])
+                else:
+                    rroot = etree.Element("{%s}Relationships" % _PKG_REL_NS, nsmap={None: _PKG_REL_NS})
+                max_rid = 0
+                for el in rroot:
+                    rid = el.get("Id") or ""
+                    m = re.match(r"rId(\d+)$", rid)
+                    if m:
+                        max_rid = max(max_rid, int(m.group(1)))
+                new_rid = max_rid + 1
+                rel_el = etree.SubElement(rroot, "{%s}Relationship" % _PKG_REL_NS)
+                rel_el.set("Id", "rId%d" % new_rid)
+                rel_el.set("Type", _CM_REL_TYPE)
+                rel_el.set("Target", "../comments/commentModern%d.xml" % slide_num)
+
+                # --- slide XML: attach commentRel extension ---
+                sroot = etree.fromstring(entries[slide_name])
+                extLst = None
+                for child in sroot:
+                    if child.tag == "{%s}extLst" % _P_NS:
+                        extLst = child
+                        break
+                if extLst is None:
+                    extLst = etree.SubElement(sroot, "{%s}extLst" % _P_NS)
+                slide_ext = etree.SubElement(extLst, "{%s}ext" % _P_NS)
+                slide_ext.set("uri", "{6950BFC3-D8DA-4A85-94F7-54DA5524770B}")
+                comment_rel = etree.SubElement(slide_ext, "{%s}commentRel" % _P14_NS)
+                comment_rel.set("{%s}id" % _R_NS, "rId%d" % new_rid)
+
+                # --- serialize modified parts ---
+                def _ser(root):
+                    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+                entries[modern_name] = _ser(mroot)
+                entries[authors_name] = _ser(aroot)
+                entries[rels_name] = _ser(rroot)
+                entries[slide_name] = _ser(sroot)
+                entries["[Content_Types].xml"] = _ser(ct_root)
+
+                # --- rebuild zip (OPC: [Content_Types].xml first) ---
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+                    zout.writestr("[Content_Types].xml", entries["[Content_Types].xml"])
+                    for name in entries:
+                        if name != "[Content_Types].xml":
+                            zout.writestr(name, entries[name])
+                buf.seek(0)
+
+                url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+                if url:
+                    return f"Comment added by {author} on slide {slide_num}: [{fname}]({url})"
+                return json.dumps({"error": "Could not save file"})
+            except Exception as e:
+                return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
         else:
             return json.dumps({"error": f"Comments not supported for {ftype}. Supported: DOCX, XLSX, PPTX."})
