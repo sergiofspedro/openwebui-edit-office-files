@@ -3,8 +3,8 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.11.2
-requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
+version: 3.11.3
+requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
 import io
@@ -776,6 +776,21 @@ class Tools:
             return None, None, None
         filename = os.path.basename(path)
         ftype = _detect_type(filename)
+        if ftype == "unknown":
+            # Files this tool itself creates via _save_and_link are stored on disk under
+            # their bare file_id (no extension), so the path's basename never carries a
+            # usable extension. Fall back to the DB's filename column, which always does.
+            try:
+                conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+                try:
+                    row = conn.execute("SELECT filename FROM file WHERE id = ?", (file_id,)).fetchone()
+                finally:
+                    conn.close()
+                if row and row[0]:
+                    filename = row[0]
+                    ftype = _detect_type(filename)
+            except Exception:
+                pass
         file_bytes = _read_file_bytes(file_id)
         return file_bytes, filename, ftype
 
@@ -4817,15 +4832,19 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             from docx import Document
             doc = Document(io.BytesIO(file_bytes))
 
-            # Ensure we have a paragraph to comment on
+            # Ensure we have a paragraph (with at least one run) to anchor the comment to
             if not doc.paragraphs:
                 doc.add_paragraph("")
             if paragraph_index >= len(doc.paragraphs):
                 paragraph_index = 0
             para = doc.paragraphs[paragraph_index]
+            if not para.runs:
+                para.add_run("")
 
-            comment = doc.add_comment(text, author=author)
-            para.add_comment(comment)
+            # python-docx's Document.add_comment(runs, text=..., author=...) anchors the
+            # comment to a Run or sequence of Runs -- it does NOT take the comment text as
+            # its first argument (that's the `text=` kwarg).
+            doc.add_comment(para.runs, text=text, author=author)
             buf = io.BytesIO(); doc.save(buf); buf.seek(0)
             url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
             if url: return f"Comment added by {author} on paragraph {paragraph_index}: [{fname}]({url})"

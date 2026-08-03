@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.3] - 2026-08-03
+
+### Fixed
+- **`_resolve_file()` detected file type from the on-disk path instead of the DB `filename`
+  column** — files this tool itself creates via `_save_and_link()` are stored under their bare
+  file UUID with no extension, so every function routed through `_resolve_file()` (`add_comment`,
+  `document_stats`, and others sharing the same helper) returned "Unsupported format" for any
+  file the tool had previously created — a common two-step flow ("create a doc, then comment on
+  it"). Now falls back to the DB's `filename` column, which always carries the real extension,
+  whenever path-based detection comes back `unknown`.
+- **`add_comment()` on DOCX called `Document.add_comment()` with the wrong argument** — passed
+  the comment text as the first positional arg (`runs`), which python-docx expects to be a `Run`
+  or sequence of `Run`s to anchor the comment to, not a string. Every DOCX comment call raised
+  `AttributeError: 'str' object has no attribute 'mark_comment_range'`. Now anchors to the target
+  paragraph's runs (adding an empty run first if the paragraph has none) and passes the comment
+  body via the `text=` keyword, matching the real API.
+- **`requirements:` header was missing 8 of the tool's actual runtime dependencies**
+  (`docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client,
+  google-auth`) — present in the code (track changes, PDF/OCR, QR codes, Google Drive upload)
+  but never listed, so a fresh install without them already present would silently break those
+  features on first use.
+
+Both `_resolve_file` and DOCX `add_comment` were verified against real files (create → comment →
+reopen and confirm the comment landed) on a live Open WebUI instance, not just import-tested.
+
 ## [3.11.2] - 2026-08-03
 
 ### Fixed
