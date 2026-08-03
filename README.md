@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.11.2** | Fix duplicate PPTX comment ext URI on repeat calls + modular src/ package split |
 | **v3.11.1** | PPTX comments with author names now fully implemented via lxml (modern comments) — corrects the premature v3.11.0 claim |
 | **v3.11.0** | Comments in Excel (openpyxl) and PowerPoint (lxml XML) with author name, clear track changes errors for unsupported formats |
 | **v3.10.1** | 6 bug fixes: cover title case, PDF watermark, tool_stats resilience, SQLite connection leaks |

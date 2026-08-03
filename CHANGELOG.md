@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.2] - 2026-08-03
+
+### Fixed
+- **Duplicate PPTX comment ext URI on repeat `add_comment()` calls** — the slide `ext` with URI
+  `{6950BFC3-D8DA-4A85-94F7-54DA5524770B}` and its `commentRel` child are now reused instead of
+  appended on every call, and the slide `.rels` `Relationship` pointing at the same
+  `commentModern{n}.xml` target is deduplicated — repeat calls no longer corrupt the slide XML.
+
+### Changed
+- **Modular `src/` package split** — `tool.py` was split into `src/constants.py` (paths +
+  namespaces), `src/utils.py` (shared helpers), and `src/tool.py` (the `Tools` class). The root
+  `tool.py` is now a thin wrapper importing `Tools` from `src/`.
+
 ## [3.11.1] - 2026-08-03
 
 ### Added
