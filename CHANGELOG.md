@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.0] - 2026-08-04
+
+### Fixed
+- **`ocr_extract()` blocked the entire server on multi-page PDFs** — looped over every page
+  synchronously calling `pytesseract.image_to_string()` (a blocking subprocess call) inside an
+  `async def`, with no page cap. Since Open WebUI runs a single-worker event loop, one OCR call
+  on a large PDF could freeze the server for *all* users for many minutes — confirmed as the root
+  cause of repeated live freezes via a `py-spy` stack dump taken mid-incident. Now runs each
+  page's OCR in a background executor thread (`loop.run_in_executor`) so the event loop stays
+  responsive, adds a `max_pages` cap (default 25, reports pages processed vs. skipped), and a
+  60s per-page timeout as a second safety net. Verified with a real concurrency test: OCR ran for
+  112s while a concurrent unrelated task completed in ~1s, unaffected.
+
+### Added
+- **Native PDF support in `export_to_markdown()`** — previously had no PDF branch at all, so the
+  only way to get text out of a PDF via this tool was `ocr_extract()`, even for PDFs with a real
+  embedded text layer (e.g. InDesign/Distiller-produced files), where OCR is unnecessary and far
+  slower. Now extracts text directly via PyMuPDF's `page.get_text()` — no subprocess calls, near
+  -instant even on large documents. Pages with little or no extractable text are flagged in the
+  output as likely scanned images, with a pointer to `ocr_extract` for those specific pages.
+
 ## [3.12.0] - 2026-08-04
 
 ### Added

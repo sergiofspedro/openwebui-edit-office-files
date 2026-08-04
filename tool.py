@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.12.0
+version: 3.13.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -3933,9 +3933,32 @@ class Tools:
             content = self._read_pptx(file_bytes, filename)
         elif ftype in ("odt","ods","odp"):
             content = _read_odf(file_bytes, filename)
+        elif ftype == "pdf":
+            try:
+                import fitz
+            except ImportError:
+                return json.dumps({"error": "PyMuPDF not installed"})
+            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            parts = []
+            sparse_pages = []
+            for i in range(pdf.page_count):
+                text = pdf.load_page(i).get_text().strip()
+                # A page with almost no extractable text is likely a scanned image,
+                # not a real gap in an otherwise text-based PDF -- flag it instead of
+                # silently omitting it, so the caller knows ocr_extract may be needed.
+                if len(text) < 20:
+                    sparse_pages.append(i + 1)
+                parts.append(f"--- Page {i + 1} ---\n{text}" if text else f"--- Page {i + 1} ---\n[no extractable text]")
+            pdf.close()
+            content = "\n\n".join(parts)
+            if sparse_pages:
+                content += (
+                    f"\n\n[Pages with little or no extractable text (likely scanned images): "
+                    f"{', '.join(str(p) for p in sparse_pages)}. Use ocr_extract for these pages.]"
+                )
         else:
             return json.dumps({"error": f"Export not supported for {ftype}"})
-        
+
         base = os.path.splitext(filename)[0]
         md_content = f"# {base}\n\n{content}"
         md_bytes = md_content.encode('utf-8')
@@ -4026,30 +4049,67 @@ class Tools:
             return json.dumps({"error": f"Drive upload failed: {str(e)}"})
 
     # --- v3.3.0: OCR ---
-    async def ocr_extract(self, file_id: str, language: str = "eng") -> str:
-        """Extract text from images in a document using OCR. Requires pytesseract and Pillow."""
+    async def ocr_extract(self, file_id: str, language: str = "eng", max_pages: int = 25) -> str:
+        """Extract text from images in a document using OCR. Requires pytesseract and Pillow.
+
+        Args:
+            file_id: File ID to OCR
+            language: Tesseract language code(s), e.g. "eng", "por", "eng+por"
+            max_pages: Maximum number of PDF pages to OCR (default 25). Tesseract runs as a
+                subprocess per page and is slow -- large PDFs are capped to keep this from
+                running for many minutes. Pages beyond the cap are skipped, not silently dropped;
+                the response says how many were processed vs. skipped.
+        """
         try:
             import pytesseract
             from PIL import Image
-            import io as _io
-            
+            import asyncio as _asyncio
+
             file_bytes, filename, ftype = self._resolve_file(file_id)
             if not file_bytes:
                 return json.dumps({"error": f"File not found: {file_id}"})
-            
+
             if ftype == "pdf":
                 try:
                     import fitz
                     pdf = fitz.open(stream=file_bytes, filetype="pdf")
+                    total_pages = pdf.page_count
+                    pages_to_process = total_pages if max_pages <= 0 else min(total_pages, max_pages)
+                    loop = _asyncio.get_event_loop()
+
+                    def _ocr_page(page_bytes, width, height, lang):
+                        # Runs in a worker thread: PDF page render + Tesseract subprocess call
+                        # both block, so this whole function must never run on the main event
+                        # loop -- that's what froze the server on large PDFs before this fix.
+                        img = Image.frombytes("RGB", [width, height], page_bytes)
+                        return pytesseract.image_to_string(img, lang=lang)
+
                     results = []
-                    for i, page in enumerate(pdf):
+                    for i in range(pages_to_process):
+                        page = pdf.load_page(i)
                         pix = page.get_pixmap(dpi=200)
-                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                        text = pytesseract.image_to_string(img, lang=language)
+                        try:
+                            text = await _asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None, _ocr_page, pix.samples, pix.width, pix.height, language
+                                ),
+                                timeout=60,
+                            )
+                        except _asyncio.TimeoutError:
+                            results.append(f"--- Page {i+1} ---\n[OCR timed out on this page after 60s, skipped]")
+                            continue
                         if text.strip():
                             results.append(f"--- Page {i+1} ---\n{text.strip()}")
                     pdf.close()
-                    return "\n\n".join(results) if results else "No text found in PDF images"
+
+                    output = "\n\n".join(results) if results else "No text found in PDF images"
+                    if total_pages > pages_to_process:
+                        output += (
+                            f"\n\n[Processed {pages_to_process} of {total_pages} pages -- "
+                            f"stopped at max_pages={max_pages}. Call again with a higher "
+                            f"max_pages to continue.]"
+                        )
+                    return output
                 except ImportError:
                     return json.dumps({"error": "PyMuPDF not installed"})
             else:
