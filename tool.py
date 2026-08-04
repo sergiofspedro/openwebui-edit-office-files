@@ -4813,8 +4813,8 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
     # === v3.6.0: Collaboration Features ===
 
-    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, __user__=None, __request__=None) -> str:
-        """Add a review comment to a Word, Excel, or PowerPoint file.
+    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, page_num: int = 1, __user__=None, __request__=None) -> str:
+        """Add a review comment to a Word, Excel, PowerPoint, or PDF file.
 
         Args:
             file_id: File ID to comment on
@@ -4823,6 +4823,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             paragraph_index: For DOCX: paragraph index to attach comment to (default 0)
             cell_ref: For XLSX: cell reference (default "A1")
             slide_num: For PPTX: slide number (default 1)
+            page_num: For PDF: page number to attach comment to (default 1)
         """
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
@@ -5060,8 +5061,30 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             except Exception as e:
                 return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
+        elif ftype == "pdf":
+            try:
+                import fitz
+                pdf = fitz.open(stream=file_bytes, filetype="pdf")
+                if page_num < 1 or page_num > pdf.page_count:
+                    total_pages = pdf.page_count
+                    pdf.close()
+                    return json.dumps({"error": f"Page {page_num} not found in PDF (has {total_pages} pages)."})
+                page = pdf.load_page(page_num - 1)
+                annot = page.add_text_annot(fitz.Point(72, 72), text)
+                annot.set_info(title=author, content=text, subject="Comment")
+                buf = io.BytesIO()
+                pdf.save(buf)
+                pdf.close()
+                buf.seek(0)
+                url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+                if url:
+                    return f"Comment added by {author} on page {page_num}: [{fname}]({url})"
+                return json.dumps({"error": "Could not save file"})
+            except Exception as e:
+                return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
+
         else:
-            return json.dumps({"error": f"Comments not supported for {ftype}. Supported: DOCX, XLSX, PPTX."})
+            return json.dumps({"error": f"Comments not supported for {ftype}. Supported: DOCX, XLSX, PPTX, PDF."})
 
     async def version_diff(self, file_id: str, version_label: str = "") -> str:
         """Show differences between current file and a previous version."""
