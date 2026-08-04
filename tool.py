@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.13.0
+version: 3.14.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -4876,6 +4876,11 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, page_num: int = 1, __user__=None, __request__=None) -> str:
         """Add a review comment to a Word, Excel, PowerPoint, or PDF file.
 
+        Each call starts from file_id's original content and saves a new, independent file --
+        it does not accumulate onto a previous add_comment output. To add another comment on top
+        of one you just added, pass the file_id returned by that call. For adding many comments
+        to the same PDF in one go, use add_comments() instead.
+
         Args:
             file_id: File ID to comment on
             text: Comment text
@@ -4907,7 +4912,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             # its first argument (that's the `text=` kwarg).
             doc.add_comment(para.runs, text=text, author=author)
             buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
             if url: return f"Comment added by {author} on paragraph {paragraph_index}: [{fname}]({url})"
             return json.dumps({"error": "Could not save file"})
 
@@ -4919,7 +4924,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             comment = Comment(text, author)
             ws[cell_ref].comment = comment
             buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
             if url: return f"Comment added by {author} on cell {cell_ref}: [{fname}]({url})"
             return json.dumps({"error": "Could not save file"})
 
@@ -5114,7 +5119,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                             zout.writestr(name, entries[name])
                 buf.seek(0)
 
-                url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+                url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
                 if url:
                     return f"Comment added by {author} on slide {slide_num}: [{fname}]({url})"
                 return json.dumps({"error": "Could not save file"})
@@ -5125,18 +5130,15 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             try:
                 import fitz
                 pdf = fitz.open(stream=file_bytes, filetype="pdf")
-                if page_num < 1 or page_num > pdf.page_count:
-                    total_pages = pdf.page_count
+                err = self._pdf_add_text_annot(pdf, page_num, text, author)
+                if err:
                     pdf.close()
-                    return json.dumps({"error": f"Page {page_num} not found in PDF (has {total_pages} pages)."})
-                page = pdf.load_page(page_num - 1)
-                annot = page.add_text_annot(fitz.Point(72, 72), text)
-                annot.set_info(title=author, content=text, subject="Comment")
+                    return json.dumps({"error": err})
                 buf = io.BytesIO()
                 pdf.save(buf)
                 pdf.close()
                 buf.seek(0)
-                url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+                url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
                 if url:
                     return f"Comment added by {author} on page {page_num}: [{fname}]({url})"
                 return json.dumps({"error": "Could not save file"})
@@ -5145,6 +5147,69 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
         else:
             return json.dumps({"error": f"Comments not supported for {ftype}. Supported: DOCX, XLSX, PPTX, PDF."})
+
+    def _pdf_add_text_annot(self, pdf, page_num: int, text: str, author: str) -> Optional[str]:
+        """Add one text annotation to an already-open fitz PDF. Returns an error string, or None on success."""
+        import fitz
+        if page_num < 1 or page_num > pdf.page_count:
+            return f"Page {page_num} not found in PDF (has {pdf.page_count} pages)."
+        page = pdf.load_page(page_num - 1)
+        annot = page.add_text_annot(fitz.Point(72, 72), text)
+        annot.set_info(title=author, content=text, subject="Comment")
+        return None
+
+    async def add_comments(self, file_id: str, comments: list, __user__=None, __request__=None) -> str:
+        """Add multiple review comments to a PDF in one call, producing a single output file.
+
+        Use this instead of calling add_comment() repeatedly -- each add_comment call starts
+        fresh from the original file, so 28 calls would produce 28 separate single-comment PDFs
+        instead of one PDF with 28 comments. This opens the PDF once, applies every comment, and
+        saves once.
+
+        Args:
+            file_id: File ID of the PDF to comment on
+            comments: List of {"page_num": int, "text": str, "author": str (optional)} dicts
+        """
+        import fitz
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": "File not found"})
+        if ftype != "pdf":
+            return json.dumps({"error": f"add_comments only supports PDF. Got: {ftype}. Use add_comment for other formats."})
+        if not comments:
+            return json.dumps({"error": "comments list is empty"})
+
+        pdf = fitz.open(stream=file_bytes, filetype="pdf")
+        applied = 0
+        errors = []
+        for i, c in enumerate(comments):
+            page_num = c.get("page_num")
+            text = c.get("text")
+            author = c.get("author", "Reviewer")
+            if page_num is None or text is None:
+                errors.append(f"entry {i}: missing page_num or text")
+                continue
+            err = self._pdf_add_text_annot(pdf, page_num, text, author)
+            if err:
+                errors.append(f"entry {i}: {err}")
+            else:
+                applied += 1
+
+        if applied == 0:
+            pdf.close()
+            return json.dumps({"error": "No comments applied", "details": errors})
+
+        buf = io.BytesIO()
+        pdf.save(buf)
+        pdf.close()
+        buf.seek(0)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+        if not url:
+            return json.dumps({"error": "Could not save file"})
+        result = f"Added {applied} comment(s) to [{fname}]({url})"
+        if errors:
+            result += f"\n{len(errors)} entries skipped: {'; '.join(errors)}"
+        return result
 
     async def version_diff(self, file_id: str, version_label: str = "") -> str:
         """Show differences between current file and a previous version."""

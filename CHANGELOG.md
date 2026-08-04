@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.14.0] - 2026-08-04
+
+### Added
+- **`add_comments()` — batch PDF comments in one call.** `add_comment()` always starts from the
+  target file's *original* content and saves an independent copy, so calling it repeatedly
+  (e.g. 28 times for a 28-comment review) produced 28 separate single-comment PDFs instead of
+  one PDF with all comments — the caller would need to manually chain each call's returned
+  `file_id` into the next to accumulate, which the docstring never explained. `add_comments()`
+  takes a list of `{page_num, text, author}` entries, opens the PDF once, applies every comment,
+  and saves once. Verified with a real 3-comment call: single output file, all 3 annotations
+  present with correct page/text/author.
+
+### Fixed
+- **`add_comment()` never passed `__user__` to `_save_and_link()`** in any of its four format
+  branches (DOCX/XLSX/PPTX/PDF), despite the function signature already accepting it —
+  `_save_and_link()` defaults `user_id` to `""` when `__user__` is missing, so every file
+  `add_comment()` created was silently unowned in the database. Same class of bug fixed for 14
+  other functions in v3.11.x; this one was missed. Fixed all four branches; verified via a real
+  call that the resulting file record's `user_id` is correctly populated.
+
 ## [3.13.0] - 2026-08-04
 
 ### Fixed
