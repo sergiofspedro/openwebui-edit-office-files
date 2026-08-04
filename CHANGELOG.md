@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.1] - 2026-08-04
+
+### Fixed
+- **Chaining `add_comment()` calls (passing one call's returned `file_id` into the next, the
+  documented way to accumulate comments one at a time) corrupted the filename on every hop** —
+  `.pdf` growing to `.pdf.pdf.pdf...` and (before an intermediate fix in this same release) the
+  name itself getting re-base64-encoded each time. Root cause: `_resolve_file()`'s fallback path
+  (used for files this tool creates, which are stored on disk under a bare UUID) read the
+  DB-stored filename directly without decoding it first — `_encode_filename()` base64-encodes
+  the *whole* name including its extension, so passing that encoded string straight back into
+  `_save_and_link()` (which encodes again) compounded on every chained call.
+  `_decode_filename()` existed for exactly this but was never actually called anywhere in the
+  file until now. Fixing its call site surfaced a second bug in `_decode_filename()` itself: it
+  re-appended the extension on top of the already-decoded name (which already contains it),
+  duplicating it once per call. Both fixed together. Verified with a real 3-hop chained
+  `add_comment()` test — filename now stays `chain_test.pdf` on every hop, and page targeting
+  (checked in the same investigation, prompted by a report that pages weren't landing correctly
+  under real usage) was confirmed already correct — not reproducible, likely a
+  transcription/context-confusion issue in an extremely long chat rather than a tool bug.
+
 ## [3.15.0] - 2026-08-04
 
 Full bug/dead-feature audit of the file, prompted by the `_format_text` crash flagged in

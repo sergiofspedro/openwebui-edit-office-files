@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.15.0
+version: 3.15.1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -534,12 +534,15 @@ def _encode_filename(filename: str) -> str:
 def _decode_filename(encoded_name: str) -> str:
     """Decode a base64-encoded filename back to original. Returns as-is if decoding fails."""
     try:
+        # _encode_filename base64-encodes the FULL original name (extension included) then
+        # appends the real extension again as a plain suffix so path-based extension checks
+        # keep working on the encoded form. So the decoded payload already carries the
+        # extension -- don't re-append os.path.splitext(encoded_name)[1] on top of it.
         base = os.path.splitext(encoded_name)[0]
         padding = 4 - len(base) % 4
         if padding != 4:
             base += '=' * padding
-        decoded = _b64_mod.urlsafe_b64decode(base).decode('utf-8')
-        return decoded + os.path.splitext(encoded_name)[1]
+        return _b64_mod.urlsafe_b64decode(base).decode('utf-8')
     except Exception:
         return encoded_name
 
@@ -824,7 +827,11 @@ class Tools:
                 finally:
                     conn.close()
                 if row and row[0]:
-                    filename = row[0]
+                    # The DB column stores the base64-encoded name (_encode_filename) --
+                    # decode it back before handing it to callers, otherwise every
+                    # chained call (add_comment -> add_comment on the returned file_id)
+                    # re-encodes an already-encoded name, growing it on each hop.
+                    filename = _decode_filename(row[0])
                     ftype = _detect_type(filename)
             except Exception:
                 pass
