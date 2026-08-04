@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.0] - 2026-08-04
+
+Full bug/dead-feature audit of the file, prompted by the `_format_text` crash flagged in
+3.14.2. All findings verified with real calls, not just read-and-assumed.
+
+### Fixed
+- **`_format_text()` crashed on every call with `raw_text=False` (the default)** — its
+  sentence-splitting regex used a variable-length lookbehind, which Python's `re` rejects.
+  Affected `create_file`, `add_content`, `generate_spreadsheet`, `create_odf`, and any other
+  caller not explicitly passing `raw_text=True`. Rewritten to split on a fixed-width boundary
+  and merge fragments back together in plain Python when the preceding fragment ends with a
+  mini-abbreviation or a word with an internal period — same intended behavior, valid regex.
+- **`manage_revisions(file_id, "list")` always returned zero revisions** — used
+  `RevisionParagraph` without importing it (only `RevisionDocument` was imported), so every
+  paragraph raised a `NameError` that was silently swallowed by an inner `except`. Import fixed.
+- **~20 more functions never passed `__user__` to `_save_and_link()`** (same bug fixed for
+  `add_comment` in 3.14.0) — `add_content`, `replace_text`, `update_cells`, `modify_rows`,
+  `protect_file`, `create_file`, `generate_document`, `generate_slides`, `generate_spreadsheet`,
+  `tracked_change`, `merge_sheets`, `merge_pdfs`, `split_pdf`, `manage_revisions`,
+  `add_pivot_table`, `sql_to_spreadsheet`, `fill_pdf_form`, `convert_data`,
+  `conditional_format`, `import_from_api`. Every file these created was unowned in the database.
+- **~8 more functions didn't enforce the output file extension** (same bug fixed for
+  `create_file` in 3.14.2) — a caller-supplied `output_filename` without the right suffix
+  produced `application/octet-stream` files instead of the correct Office/PDF content type.
+- **New opposite bug: `create_odf`, `sql_to_spreadsheet`, `import_from_api` doubled the
+  extension** if the caller's `output_filename` already included it (e.g. `results.xlsx` →
+  `results.xlsx.xlsx`). Both this and the missing-extension bug above are now fixed by one
+  shared `_ensure_ext()` helper used everywhere output filenames are computed.
+
+### Changed
+- **`translate_errors()` now actually does something.** Previously it stored a language
+  preference that nothing ever read — every error message stayed English regardless. The three
+  shared, high-traffic messages ("File not found", "Could not save file", "Unsupported format" —
+  which together appear ~65 times across the file) now route through a `_err()` lookup that
+  respects the stored language. Function-specific error text (anything with a filename or
+  reason embedded) is unchanged/still English — full i18n of every bespoke message was out of
+  scope for what's meant to be a small convenience.
+- **`schedule_cleanup()` / `retention_policy(policy="set", ...)` no longer claim automatic
+  background execution.** There is no scheduler in this plugin (it's invoked per chat request,
+  not a persistent process) — these functions only ever stored a policy that had to be applied
+  manually via `cleanup_files()` / `retention_policy(policy="apply")`. The return messages now
+  say so plainly instead of implying it happens on its own.
+
 ## [3.14.2] - 2026-08-04
 
 ### Fixed

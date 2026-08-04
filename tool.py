@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.14.2
+version: 3.15.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -175,6 +175,21 @@ def _read_file_bytes(file_id: str) -> Optional[bytes]:
         return None
 
 
+_ERROR_TRANSLATIONS = {
+    "en": {"file_not_found": "File not found", "could_not_save": "Could not save file", "unsupported": "Unsupported format"},
+    "pt": {"file_not_found": "Ficheiro nao encontrado", "could_not_save": "Nao foi possivel guardar", "unsupported": "Formato nao suportado"},
+    "es": {"file_not_found": "Archivo no encontrado", "could_not_save": "No se pudo guardar", "unsupported": "Formato no soportado"},
+    "fr": {"file_not_found": "Fichier introuvable", "could_not_save": "Impossible d'enregistrer", "unsupported": "Format non pris en charge"},
+    "de": {"file_not_found": "Datei nicht gefunden", "could_not_save": "Konnte nicht gespeichert werden", "unsupported": "Nicht unterstutztes Format"},
+}
+
+
+def _ensure_ext(name: str, ext: str) -> str:
+    """Ensure `name` ends with `.ext`, without doubling it if already present."""
+    ext = ext.lower().lstrip(".")
+    return name if name.lower().endswith(f".{ext}") else f"{name}.{ext}"
+
+
 def _detect_type(filename: str) -> str:
     """Detect file type from extension."""
     ext = os.path.splitext(filename)[1].lower()
@@ -307,13 +322,35 @@ def _format_text(text: str, mode: str = "format") -> str:
     _MINI_ABBREV = {'Dr', 'Mr', 'Mrs', 'Ms', 'Prof', 'Sr', 'Jr', 'St', 'vs', 'etc',
                     'Jan', 'Feb', 'Mar', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'}
 
-    _abbrev_pattern = '|'.join(_re.escape(a) for a in sorted(_MINI_ABBREV, key=len, reverse=True))
-    _sentence_re = _re.compile(
-        r'(?<!\b(?:' + _abbrev_pattern + r'))'   # not after mini-abbrev
-        r'(?<!\.[A-Za-z])'                         # not after word with internal period
-        r'(?<=[.!?])\s+'                            # after .!? + space
-    )
-    sentences = _sentence_re.split(text)
+    # Python's re requires fixed-width lookbehind, so a variable-length alternation of
+    # abbreviations (Dr|Mrs|Prof|...) can't live inside (?<!...). Split on the fixed-width
+    # boundary first, then merge a split back together whenever the preceding fragment ends
+    # with a mini-abbreviation or a word containing an internal period (U.S.A., e.g., i.e.).
+    _boundary_re = _re.compile(r'(?<=[.!?])\s+')
+    _last_token_re = _re.compile(r'(\S+)$')
+    _internal_period_re = _re.compile(r'[A-Za-z]\.[A-Za-z]')
+
+    def _ends_with_abbrev(fragment):
+        m = _last_token_re.search(fragment)
+        if not m:
+            return False
+        token = m.group(1)
+        if token.rstrip('.!?') in _MINI_ABBREV:
+            return True
+        return bool(_internal_period_re.search(token))
+
+    raw_parts = _boundary_re.split(text)
+    sentences = []
+    buf = ""
+    for part in raw_parts:
+        if buf and _ends_with_abbrev(buf):
+            buf += " " + part
+        else:
+            if buf:
+                sentences.append(buf)
+            buf = part
+    if buf:
+        sentences.append(buf)
 
     # Sentence case with intentional capitalization preservation
     # Rule: words with ANY uppercase letter are preserved as-is (proper nouns,
@@ -1424,10 +1461,10 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nAdded content to {file_type.upper()} file, preserving original formatting."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
 
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
@@ -1588,10 +1625,10 @@ class Tools:
                 return json.dumps({"error": f"Unsupported type: {file_type}"})
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nReplaced '{find_text}' with '{replace_with}' in {count} place(s), preserving all formatting."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
 
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
@@ -1669,10 +1706,10 @@ class Tools:
             wb.close()
             out.seek(0)
 
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nUpdated {count} cell(s) in {file_type.upper()} file."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -1740,10 +1777,10 @@ class Tools:
             wb.close()
             out.seek(0)
 
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\n{msg} in {file_type.upper()} file."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -1839,10 +1876,10 @@ class Tools:
                 out.seek(0)
                 protected_bytes = out.read()
 
-            url, fname = await self._save_and_link(protected_bytes, out_name, __request__)
+            url, fname = await self._save_and_link(protected_bytes, out_name, __request__, __user__=__user__)
             if url:
                 return f"[{fname}]({url})\n\nPassword-protected {file_type.upper()} file created."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -2024,10 +2061,10 @@ class Tools:
                 prs.save(out)
 
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nCreated new {ftype.upper()} file."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
 
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
@@ -2841,10 +2878,10 @@ class Tools:
         file_bytes = io.BytesIO()
         doc.save(file_bytes)
         file_bytes.seek(0)
-        url, fname = await self._save_and_link(file_bytes.getvalue(), f"{title}.docx", __request__)
+        url, fname = await self._save_and_link(file_bytes.getvalue(), _ensure_ext(title, "docx"), __request__, __user__=__user__)
         if url:
             return f"Document created: [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
 
     async def generate_slides(self, content: str, title: str = "Presentation", theme: str = "modern", raw_text: bool = False, __user__=None, __request__=None) -> str:
@@ -2943,10 +2980,10 @@ class Tools:
             out = io.BytesIO()
             prs.save(out)
             out.seek(0)
-            url, fname = await self._save_and_link(out.getvalue(), "%s.pptx" % title, __request__)
+            url, fname = await self._save_and_link(out.getvalue(), _ensure_ext(title, "pptx"), __request__, __user__=__user__)
             if url:
                 return "Presentation created: [%s](%s)" % (fname, url)
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3072,10 +3109,10 @@ class Tools:
             out = io.BytesIO()
             wb.save(out)
             out.seek(0)
-            url, fname = await self._save_and_link(out.getvalue(), "%s.xlsx" % title, __request__)
+            url, fname = await self._save_and_link(out.getvalue(), _ensure_ext(title, "xlsx"), __request__, __user__=__user__)
             if url:
                 return "Spreadsheet created: [%s](%s)" % (fname, url)
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3094,7 +3131,7 @@ class Tools:
                 if not row:
                     row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
                 if not row:
-                    return json.dumps({"error": "File not found"})
+                    return json.dumps({"error": self._err("file_not_found")})
                 filename = row[0]
                 meta = json.loads(row[1]) if row[1] else {}
                 data = _read_file_bytes(meta.get("path", file_id))
@@ -3142,10 +3179,10 @@ class Tools:
             out = io.BytesIO()
             doc.save(out)
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nTracked changes by '{author}':\n" + "\n".join(results)
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3196,10 +3233,10 @@ class Tools:
             wb_out.save(out)
             out.seek(0)
             fname = output_filename or "merged_workbook.xlsx"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nMerged {merged} sheets from {len(ids)} files."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3273,10 +3310,10 @@ class Tools:
             merger.close()
             out.seek(0)
             fname = output_filename or "merged.pdf"
-            url, name = await self._save_and_link(out.read(), fname, __request__)
+            url, name = await self._save_and_link(out.read(), fname, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\nMerged {count} PDFs into one file."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3289,7 +3326,7 @@ class Tools:
                 if not row:
                     row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+file_id+"%",)).fetchone()
                 if not row:
-                    return json.dumps({"error": "File not found"})
+                    return json.dumps({"error": self._err("file_not_found")})
                 meta = json.loads(row[0]) if row[0] else {}
                 data = _read_file_bytes(meta.get("path", file_id))
                 if not data:
@@ -3308,7 +3345,7 @@ class Tools:
                 sub.close()
                 out.seek(0)
                 part_name = f"part_{start+1}_{end}.pdf"
-                url, name = await self._save_and_link(out.read(), part_name, __request__)
+                url, name = await self._save_and_link(out.read(), part_name, __request__, __user__=__user__)
                 if url:
                     urls.append(f"[{name}]({url})")
             src.close()
@@ -3404,7 +3441,7 @@ class Tools:
                 if not row:
                     row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
                 if not row:
-                    return json.dumps({"error": "File not found"})
+                    return json.dumps({"error": self._err("file_not_found")})
                 filename = row[0]
                 meta = json.loads(row[1]) if row[1] else {}
                 data = _read_file_bytes(meta.get("path", file_id))
@@ -3418,8 +3455,8 @@ class Tools:
             if ftype != "docx":
                 return json.dumps({"error": f"Revision management is only supported for DOCX files. {ftype.upper()} format does not support revision marks."})
 
-            from docx_revisions import RevisionDocument
-    
+            from docx_revisions import RevisionDocument, RevisionParagraph
+
             if action == "list":
                 rdoc = RevisionDocument(io.BytesIO(data))
                 revs = []
@@ -3449,10 +3486,10 @@ class Tools:
             out = io.BytesIO()
             rdoc.save(out)
             out.seek(0)
-            url, name = await self._save_and_link(out.read(), out_name, __request__)
+            url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
             if url:
                 return f"[{name}]({url})\n\n{msg}."
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3517,7 +3554,7 @@ class Tools:
             url, fname = await self._save_and_link(buf.getvalue(), f"{filename}.{format}", __request__, __user__=__user__)
             if url:
                 return f"ODF file created: [{fname}]({url})"
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except ImportError:
             return json.dumps({"error": "odfpy not installed. Install with: pip install odfpy"})
         except Exception as e:
@@ -3584,12 +3621,18 @@ class Tools:
 
     # --- v3.2.0: Scheduled Cleanup ---
     async def schedule_cleanup(self, days_old: int = 30, interval_hours: int = 24) -> str:
-        """Schedule automatic cleanup every N hours. Set interval_hours=0 to disable."""
+        """Store a cleanup policy (days_old, interval_hours) for later use. This tool has no
+        background scheduler -- the policy only takes effect when cleanup_files() or
+        retention_policy(policy="apply") is called explicitly."""
         schedule = {"days_old": days_old, "interval_hours": interval_hours, "enabled": interval_hours > 0}
         self.valves.cleanup_schedule = json.dumps(schedule)
         if interval_hours > 0:
-            return f"Cleanup scheduled: remove files older than {days_old} days, every {interval_hours} hours."
-        return "Scheduled cleanup disabled."
+            return (
+                f"Cleanup policy stored: remove files older than {days_old} days. "
+                f"This does not run automatically -- call cleanup_files() or "
+                f"retention_policy(policy=\"apply\") whenever you want it applied."
+            )
+        return "Stored cleanup policy disabled."
 
     # --- v3.2.0: Mail Merge ---
     async def mail_merge(self, template_file_id: str, data_file_id: str, output_prefix: str = "merged", __user__=None, __request__=None) -> str:
@@ -3672,7 +3715,7 @@ class Tools:
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url:
             return f"Chart added: [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.2.0: Watermark ---
     async def add_watermark(self, file_id: str, text: str = "DRAFT", __user__=None, __request__=None) -> str:
@@ -3720,7 +3763,7 @@ class Tools:
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url:
             return f"Watermark added: [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.2.0: File Preview ---
     async def preview_file(self, file_id: str, max_lines: int = 20) -> str:
@@ -3792,7 +3835,7 @@ class Tools:
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url:
             return f"Metadata updated ({', '.join(changes)}): [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.2.0: Accessibility Check ---
     async def check_accessibility(self, file_id: str) -> str:
@@ -3864,7 +3907,7 @@ class Tools:
                     url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
                     if url:
                         return f"Alt text added: [{fname}]({url})"
-                    return json.dumps({"error": "Could not save file"})
+                    return json.dumps({"error": self._err("could_not_save")})
                 pic_count += 1
         return json.dumps({"error": f"Image {shape_index} not found. Found {pic_count} images."})
 
@@ -3968,7 +4011,7 @@ class Tools:
         url, fname = await self._save_and_link(md_bytes, f"{base}.md", __request__, __user__=__user__)
         if url:
             return f"Exported to Markdown: [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.3.0: Import from URL ---
     async def import_from_url(self, url: str, title: str = "Web Document", __user__=None, __request__=None) -> str:
@@ -4121,16 +4164,21 @@ class Tools:
         except Exception as e:
             return json.dumps({"error": f"OCR failed: {str(e)}"})
 
+    def _err(self, key: str) -> str:
+        """Look up a shared error message in the language set via translate_errors()."""
+        lang = self.valves.language or "en"
+        table = _ERROR_TRANSLATIONS.get(lang, _ERROR_TRANSLATIONS["en"])
+        return table.get(key, _ERROR_TRANSLATIONS["en"].get(key, key))
+
     # --- v3.3.0: i18n Error Messages ---
     async def translate_errors(self, language: str = "en") -> str:
-        """Set the language for error messages. Supported: en, pt, es, fr, de."""
-        translations = {
-            "en": {"file_not_found": "File not found", "could_not_save": "Could not save file", "unsupported": "Unsupported format"},
-            "pt": {"file_not_found": "Ficheiro nao encontrado", "could_not_save": "Nao foi possivel guardar", "unsupported": "Formato nao suportado"},
-            "es": {"file_not_found": "Archivo no encontrado", "could_not_save": "No se pudo guardar", "unsupported": "Formato no soportado"},
-            "fr": {"file_not_found": "Fichier introuvable", "could_not_save": "Impossible d'enregistrer", "unsupported": "Format non pris en charge"},
-            "de": {"file_not_found": "Datei nicht gefunden", "could_not_save": "Konnte nicht gespeichert werden", "unsupported": "Nicht unterstutztes Format"},
-        }
+        """Set the language for error messages. Supported: en, pt, es, fr, de.
+
+        Only applies to the shared "File not found" / "Could not save file" / "Unsupported
+        format" messages used across most functions -- function-specific error text (e.g.
+        messages that include a filename or reason) stays in English.
+        """
+        translations = _ERROR_TRANSLATIONS
         if language not in translations:
             return json.dumps({"error": f"Language '{language}' not supported. Available: {', '.join(translations.keys())}"})
         self.valves.language = language
@@ -4158,7 +4206,7 @@ class Tools:
         """Add speaker notes to a PowerPoint slide."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype != "pptx": return json.dumps({"error": "Speaker notes only supported for PPTX"})
         from pptx import Presentation
         prs = Presentation(io.BytesIO(file_bytes))
@@ -4170,19 +4218,19 @@ class Tools:
         buf = io.BytesIO(); prs.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return "Speaker notes added to slide " + str(slide_num) + ": [" + str(fname) + "](" + str(url) + ")"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.4.0: Document Stats ---
     async def document_stats(self, file_id: str) -> str:
         """Show document statistics: word count, reading time, complexity."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"):
             content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
         elif ftype == "docx": content = self._read_docx(file_bytes, filename)
         elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
         elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
-        else: return json.dumps({"error": "Unsupported format"})
+        else: return json.dumps({"error": self._err("unsupported")})
         words = len(content.split())
         chars = len(content)
         lines = content.count('\n') + 1
@@ -4197,7 +4245,7 @@ class Tools:
         """Add a QR code to a DOCX or PPTX file."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         try:
             import qrcode
             from PIL import Image
@@ -4223,7 +4271,7 @@ class Tools:
         else: return json.dumps({"error": "QR codes only supported for DOCX and PPTX"})
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return "QR code added: [" + str(fname) + "](" + str(url) + ")"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.4.0: Bulk Folder Ops ---
     async def bulk_folder_ops(self, operation: str = "list", pattern: str = "*", __user__=None, __request__=None) -> str:
@@ -4301,7 +4349,7 @@ class Tools:
         """Add data validation to an Excel column. Types: list, whole, decimal, date. values: comma-separated for list, or 'min,max' for numeric."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype not in ("xlsx","xls"): return json.dumps({"error": "Data validation only for Excel files"})
         from openpyxl import load_workbook
         from openpyxl.worksheet.datavalidation import DataValidation
@@ -4335,14 +4383,14 @@ class Tools:
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return "Data validation added to column " + str(col_letter) + ": [" + str(fname) + "](" + str(url) + ")"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.4.0: Named Ranges ---
     async def add_named_range(self, file_id: str, name: str, range_str: str = "", __user__=None, __request__=None) -> str:
         """Define a named range in Excel. range_str: 'A1:B10' or auto-detected from active sheet."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype not in ("xlsx","xls"): return json.dumps({"error": "Named ranges only for Excel"})
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
@@ -4356,14 +4404,14 @@ class Tools:
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return "Named range '" + str(name) + "' = " + str(range_str) + ": [" + str(fname) + "](" + str(url) + ")"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.4.0: Slide Transitions ---
     async def add_slide_transitions(self, file_id: str, transition_type: str = "fade", duration: float = 0.5, __user__=None, __request__=None) -> str:
         """Add transitions to all slides in a PPTX. Types: fade, push, wipe, split, random."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype != "pptx": return json.dumps({"error": "Transitions only for PPTX"})
         from pptx import Presentation
         from pptx.util import Pt
@@ -4391,14 +4439,14 @@ class Tools:
         buf = io.BytesIO(); prs.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return "Transitions added (" + str(transition_type) + "): [" + str(fname) + "](" + str(url) + ")"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.4.0: Export to HTML ---
     async def export_to_html(self, file_id: str, __user__=None, __request__=None) -> str:
         """Export any Office file to a styled HTML page."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"):
             content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
         elif ftype == "docx": content = self._read_docx(file_bytes, filename)
@@ -4440,7 +4488,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         html_bytes = html.encode('utf-8')
         url, fname = await self._save_and_link(html_bytes, base + ".html", __request__, __user__=__user__)
         if url: return "Exported to HTML: [" + str(fname) + "](" + str(url) + ")"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
 
     # === v3.6.0: AI-Powered Features ===
@@ -4448,12 +4496,12 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     async def ai_analyze(self, file_id: str) -> str:
         """Extract document text for AI analysis. The LLM will analyze topics, sentiment, entities, and provide a summary."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
         elif ftype == "docx": content = self._read_docx(file_bytes, filename)
         elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
         elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
-        else: return json.dumps({"error": "Unsupported format"})
+        else: return json.dumps({"error": self._err("unsupported")})
         words = len(content.split())
         preview = content[:5000]
         return f"**Document: {filename}** ({words} words)\n\nAnalyze this document and provide:\n1. Main topics (3-5 bullet points)\n2. Sentiment (positive/negative/neutral)\n3. Key entities (people, companies, dates)\n4. Executive summary (2-3 sentences)\n\n```\n{preview}\n```" + ("\n\n... (truncated)" if len(content) > 5000 else "")
@@ -4461,45 +4509,45 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     async def smart_fill(self, file_id: str, section: str, instruction: str, __user__=None, __request__=None) -> str:
         """Fill a document section using AI based on instructions. The LLM will generate content for the specified section."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
         elif ftype == "docx": content = self._read_docx(file_bytes, filename)
         elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
         elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
-        else: return json.dumps({"error": "Unsupported format"})
+        else: return json.dumps({"error": self._err("unsupported")})
         return f"**Smart Fill: {filename}**\n\nSection to fill: **{section}**\nInstructions: {instruction}\n\nCurrent document content:\n```\n{content[:3000]}\n```\n\nPlease generate the content for the '{section}' section based on the instructions and existing document context."
 
     async def grammar_check(self, file_id: str) -> str:
         """Check document for grammar and style issues. The LLM will provide corrections."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
         elif ftype == "docx": content = self._read_docx(file_bytes, filename)
         elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
         elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
-        else: return json.dumps({"error": "Unsupported format"})
+        else: return json.dumps({"error": self._err("unsupported")})
         return f"**Grammar Check: {filename}**\n\nReview this document for:\n1. Grammar errors\n2. Spelling mistakes\n3. Style inconsistencies\n4. Passive voice overuse\n5. Readability issues\n\nProvide corrections with line references:\n\n```\n{content[:4000]}\n```"
 
     async def translate_document(self, file_id: str, target_language: str, __user__=None, __request__=None) -> str:
         """Translate a document to another language. The LLM will translate while preserving structure."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
         elif ftype == "docx": content = self._read_docx(file_bytes, filename)
         elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
         elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
-        else: return json.dumps({"error": "Unsupported format"})
+        else: return json.dumps({"error": self._err("unsupported")})
         return f"**Translate to {target_language}: {filename}**\n\nTranslate the following document to {target_language}. Preserve all formatting markers (# for headings, | for tables, - for bullets). Keep numbers, dates, and proper names unchanged.\n\n```\n{content[:4000]}\n```"
 
     async def classify_document(self, file_id: str) -> str:
         """Auto-classify a document by type, theme, and department."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
         elif ftype == "docx": content = self._read_docx(file_bytes, filename)
         elif ftype == "pptx": content = self._read_pptx(file_bytes, filename)
         elif ftype in ("odt","ods","odp"): content = _read_odf(file_bytes, filename)
-        else: return json.dumps({"error": "Unsupported format"})
+        else: return json.dumps({"error": self._err("unsupported")})
         return f"**Classify: {filename}**\n\nAnalyze this document and provide:\n1. Document type (report, proposal, invoice, contract, presentation, spreadsheet, letter, memo, manual, other)\n2. Primary theme/topic\n3. Department (finance, HR, marketing, engineering, sales, legal, operations, other)\n4. Confidentiality level (public, internal, confidential, restricted)\n5. Suggested tags (3-5 keywords)\n\n```\n{content[:2000]}\n```"
 
     async def smart_template(self, name: str, description: str, __user__=None, __request__=None) -> str:
@@ -4517,7 +4565,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         import io
         from collections import defaultdict
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype not in ("xlsx","xls"): return json.dumps({"error": "Pivot tables only for Excel"})
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
@@ -4575,9 +4623,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                     pivot_ws.cell(row=r, column=2, value=sum(vals))
         result = f"Pivot table created in sheet 'Pivot' ({len(agg_map)} rows). Fields: rows={rows_field}, data={data_field}, aggregate={aggregate}"
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return f"{result}: [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     async def sql_to_spreadsheet(self, query: str, output_filename: str = "query_results", __user__=None, __request__=None) -> str:
         """Execute a SQL query on the local SQLite database and export results to Excel."""
@@ -4603,15 +4651,15 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             for j, key in enumerate(headers, 1):
                 ws.cell(row=i, column=j, value=row[key])
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-        url, fname = await self._save_and_link(buf.getvalue(), f"{output_filename}.xlsx", __request__)
+        url, fname = await self._save_and_link(buf.getvalue(), _ensure_ext(output_filename, "xlsx"), __request__, __user__=__user__)
         if url: return f"Query results ({len(rows)} rows): [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     async def fill_pdf_form(self, file_id: str, field_values: str, __user__=None, __request__=None) -> str:
         """Fill a PDF form with values. field_values: 'field1=value1,field2=value2'."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype != "pdf": return json.dumps({"error": "PDF form filling only for PDF files"})
         try:
             import fitz
@@ -4629,9 +4677,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                         widget.update()
                         filled += 1
             buf = io.BytesIO(); pdf.save(buf); pdf.close(); buf.seek(0)
-            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
             if url: return f"Filled {filled} field(s): [{fname}]({url})"
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         except ImportError:
             return json.dumps({"error": "PyMuPDF not installed"})
         except Exception as e:
@@ -4641,7 +4689,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         """Convert between CSV, JSON, and XML formats. target_format: csv, json, xml."""
         import io, csv as _csv
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         base = os.path.splitext(filename)[0]
         text = file_bytes.decode('utf-8', errors='replace')
         if target_format == "json":
@@ -4695,16 +4743,16 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         else:
             return json.dumps({"error": f"Unsupported target format: {target_format}. Use: csv, json, xml"})
         result_bytes = result.encode('utf-8')
-        url, fname = await self._save_and_link(result_bytes, f"{base}{ext}", __request__)
+        url, fname = await self._save_and_link(result_bytes, f"{base}{ext}", __request__, __user__=__user__)
         if url: return f"Converted to {target_format.upper()}: [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # === v3.6.0: Enterprise Features ===
 
     async def compliance_check(self, file_id: str, standard: str = "gdpr") -> str:
         """Check document for compliance issues. standards: gdpr, accessibility, branding, all."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         issues = []
         if standard in ("gdpr", "all"):
             text = ""
@@ -4764,7 +4812,11 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             return "No retention policy active. Use: retention_policy(policy='set', days=90)"
         elif policy == "set":
             self.valves.cleanup_schedule = json.dumps({"days_old": days, "interval_hours": 24, "enabled": True, "file_type": file_type})
-            return f"Retention policy set: delete {file_type} files older than {days} days."
+            return (
+                f"Retention policy stored: {file_type} files older than {days} days. "
+                f"This does not run automatically -- call retention_policy(policy=\"apply\") "
+                f"whenever you want it applied."
+            )
         elif policy == "apply":
             return await self.cleanup_files(days_old=days)
         return json.dumps({"error": f"Unknown policy: {policy}. Use: view, set, apply"})
@@ -4843,7 +4895,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         """Apply conditional formatting rules to Excel. rules: 'col:A,op:>,val:100,color:27AE60;col:B,op:<,val:0,color:E74C3C'."""
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype not in ("xlsx","xls"): return json.dumps({"error": "Conditional formatting only for Excel"})
         from openpyxl import load_workbook
         from openpyxl.formatting.rule import CellIsRule
@@ -4869,9 +4921,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             ws.conditional_formatting.add(cell_range, CellIsRule(operator=op, formula=[val], fill=fill))
             applied += 1
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__)
+        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if url: return f"Applied {applied} conditional formatting rule(s): [{fname}]({url})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
     # === v3.6.0: Collaboration Features ===
 
@@ -4894,7 +4946,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         """
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
 
         if ftype == "docx":
             from docx import Document
@@ -4916,7 +4968,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             buf = io.BytesIO(); doc.save(buf); buf.seek(0)
             url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
             if url: return f"Comment added by {author} on paragraph {paragraph_index}: [{fname}]({url})"
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
 
         elif ftype == "xlsx":
             from openpyxl import load_workbook
@@ -4928,7 +4980,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             buf = io.BytesIO(); wb.save(buf); buf.seek(0)
             url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
             if url: return f"Comment added by {author} on cell {cell_ref}: [{fname}]({url})"
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
 
         elif ftype == "pptx":
             try:
@@ -5124,7 +5176,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
                 if url:
                     return f"Comment added by {author} on slide {slide_num}: [{fname}]({url})"
-                return json.dumps({"error": "Could not save file"})
+                return json.dumps({"error": self._err("could_not_save")})
             except Exception as e:
                 return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -5143,7 +5195,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
                 if url:
                     return f"Comment added by {author} on page {page_num}: [{fname}]({url})"
-                return json.dumps({"error": "Could not save file"})
+                return json.dumps({"error": self._err("could_not_save")})
             except Exception as e:
                 return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -5175,7 +5227,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         import fitz
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
-            return json.dumps({"error": "File not found"})
+            return json.dumps({"error": self._err("file_not_found")})
         if ftype != "pdf":
             return json.dumps({"error": f"add_comments only supports PDF. Got: {ftype}. Use add_comment for other formats."})
         if not comments:
@@ -5207,7 +5259,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if not url:
-            return json.dumps({"error": "Could not save file"})
+            return json.dumps({"error": self._err("could_not_save")})
         result = f"Added {applied} comment(s) to [{fname}]({url})"
         if errors:
             result += f"\n{len(errors)} entries skipped: {'; '.join(errors)}"
@@ -5216,7 +5268,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     async def version_diff(self, file_id: str, version_label: str = "") -> str:
         """Show differences between current file and a previous version."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
-        if not file_bytes: return json.dumps({"error": "File not found"})
+        if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         base = os.path.splitext(filename)[0]
         ext = os.path.splitext(filename)[1]
         import glob as _glob, time as _time
@@ -5290,7 +5342,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 for j, key in enumerate(headers, 1):
                     ws.cell(row=i, column=j, value=str(item.get(key, "")))
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-        url_out, fname = await self._save_and_link(buf.getvalue(), f"{output_filename}.xlsx", __request__)
+        url_out, fname = await self._save_and_link(buf.getvalue(), _ensure_ext(output_filename, "xlsx"), __request__, __user__=__user__)
         if url_out: return f"Imported {len(data)} records from API: [{fname}]({url_out})"
-        return json.dumps({"error": "Could not save file"})
+        return json.dumps({"error": self._err("could_not_save")})
 
