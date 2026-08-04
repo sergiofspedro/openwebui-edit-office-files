@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.12.0] - 2026-08-04
+
+### Added
+- **PDF comment support in `add_comment()`** — PyMuPDF sticky-note text annotations with author name (appears as the annotation title). New `page_num` parameter. The same method now covers DOCX, XLSX, PPTX, and PDF.
 
 ## [3.11.3] - 2026-08-03
 
