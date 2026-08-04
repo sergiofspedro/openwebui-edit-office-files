@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.14.1] - 2026-08-04
+
+### Fixed
+- **Every file this tool ever created was unreachable via Open WebUI's own `/content` download
+  endpoint** — `_save_and_link()` wrote a plain preview string (e.g.
+  `"[Word document: 45637 bytes]"`) directly into the `file` table's `data` column, which
+  SQLAlchemy treats as a JSON type and auto-deserializes on every read. A non-JSON string there
+  throws `JSONDecodeError`, which Open WebUI's `Files.get_file_by_id()` silently swallows
+  (`except Exception: return None`) — so every download link this tool ever produced 404'd with
+  a generic "not found" even though the file existed fine on disk the whole time. Root-caused by
+  reproducing the exact failing request with a real admin JWT and tracing the swallowed
+  exception directly, not guessed. Fixed by JSON-encoding the preview
+  (`json.dumps({"content_preview": preview})`), matching the shape Open WebUI's own native
+  upload code uses. A one-time repair migration was run against the live database to fix all
+  pre-existing affected records (44 of 122 existing files needed repair; verified two
+  specifically-reported broken links now return `200`).
+
 ## [3.14.0] - 2026-08-04
 
 ### Added

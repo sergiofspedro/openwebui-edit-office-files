@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.14.0
+version: 3.14.1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -939,7 +939,7 @@ class Tools:
                         file_hash,
                         _encode_filename(filename),
                         os.path.join(_UPLOAD_DIR, file_id),
-                        preview,
+                        json.dumps({"content_preview": preview}),
                         json.dumps({
                             "name": filename,
                             "content_type": content_type,
