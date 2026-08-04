@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.14.2] - 2026-08-04
+
+### Fixed
+- **`create_file()` didn't enforce the file extension on `output_filename`** — if the caller
+  passed a name without the correct suffix (e.g. `"Review_Comments"` instead of
+  `"Review_Comments.docx"`), the saved file kept the bare name, so `_save_and_link()`'s
+  extension-based content-type lookup fell through to `application/octet-stream` and browsers/OS
+  had no way to know it was a Word/Excel/PowerPoint file. Now appends the correct `.{ftype}`
+  extension automatically when missing. Verified with a real call using an extension-less
+  filename, confirming the saved record's filename and content-type are now correct.
+
+### Known issue (not fixed in this release)
+- `_format_text()`'s sentence-splitting regex uses a variable-length lookbehind
+  (`(?<!\b(?:Dr|Mrs|Prof|...))`), which Python's `re` module rejects
+  (`look-behind requires fixed-width pattern`) — found while testing this release.
+  **`create_file()` and any other function routing text through `_format_text()` with
+  `raw_text=False` (the default) currently crashes for docx output.** `raw_text=True` bypasses
+  it as a workaround. Needs its own fix (fixed-width alternation, or a non-lookbehind rewrite of
+  the sentence-boundary check).
+
 ## [3.14.1] - 2026-08-04
 
 ### Fixed
