@@ -872,12 +872,13 @@ Tools._read_docx = _read_docx
 Tools._read_pptx = _read_pptx
 Tools._parse_csv_rows = _parse_csv_rows
 
-from .office_write import create_file, generate_document, generate_slides, generate_spreadsheet, add_content, add_chart, add_watermark, add_alt_text, add_speaker_notes, add_qr_code, add_data_validation, add_named_range, add_slide_transitions, add_pivot_table, sql_to_spreadsheet, fill_pdf_form, document_assembly, conditional_format, smart_fill
+from .office_write import create_file, generate_document, generate_slides, generate_spreadsheet, add_content, _last_populated_row, add_chart, add_watermark, add_alt_text, add_speaker_notes, add_qr_code, add_data_validation, add_named_range, add_slide_transitions, add_pivot_table, sql_to_spreadsheet, fill_pdf_form, document_assembly, conditional_format, smart_fill
 Tools.create_file = create_file
 Tools.generate_document = generate_document
 Tools.generate_slides = generate_slides
 Tools.generate_spreadsheet = generate_spreadsheet
 Tools.add_content = add_content
+Tools._last_populated_row = _last_populated_row
 Tools.add_chart = add_chart
 Tools.add_watermark = add_watermark
 Tools.add_alt_text = add_alt_text

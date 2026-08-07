@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.15.2** | Fix `add_content()` inserting new spreadsheet rows after trailing empty rows instead of right after the real data |
 | **v3.12.0** | PDF comments with author names via PyMuPDF sticky notes |
 | **v3.11.2** | Fix duplicate PPTX comment ext URI on repeat calls + modular src/ package split |
 | **v3.11.1** | PPTX comments with author names now fully implemented via lxml (modern comments) — corrects the premature v3.11.0 claim |

@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.15.1
+version: 3.15.2
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -921,6 +921,19 @@ class Tools:
             parsed_rows.append(converted)
         return parsed_rows
 
+    def _last_populated_row(self, ws) -> int:
+        """Return the last row index that actually has a non-empty cell value.
+
+        ws.max_row includes trailing rows that only carry formatting/blank
+        cells, so appending after it can leave a large gap of empty rows
+        before new content when the sheet has such trailing rows.
+        """
+        for row in range(ws.max_row or 0, 0, -1):
+            for cell in ws[row]:
+                if cell.value is not None and str(cell.value).strip() != "":
+                    return row
+        return 0
+
     # -----------------------------------------------------------------
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
@@ -1304,9 +1317,10 @@ class Tools:
                     return json.dumps({"error": "No rows provided in CSV content"})
 
                 # Get reference styles from last row
+                last_data_row = self._last_populated_row(ws)
                 ref = {}
-                if ws.max_row and ws.max_row >= 1:
-                    for cell in ws[ws.max_row]:
+                if last_data_row >= 1:
+                    for cell in ws[last_data_row]:
                         if cell.has_style:
                             ref[cell.column] = {
                                 "font": copy(cell.font),
@@ -1316,7 +1330,7 @@ class Tools:
                                 "number_format": cell.number_format,
                             }
 
-                start = (ws.max_row or 0) + 1
+                start = last_data_row + 1
                 for i, rd in enumerate(parsed_rows):
                     for j, v in enumerate(rd, 1):
                         cell = ws.cell(row=start + i, column=j)
@@ -1351,9 +1365,10 @@ class Tools:
                 if not parsed_rows:
                     return json.dumps({"error": "No rows provided in CSV content"})
 
+                last_data_row = self._last_populated_row(ws)
                 ref = {}
-                if ws.max_row and ws.max_row >= 1:
-                    for cell in ws[ws.max_row]:
+                if last_data_row >= 1:
+                    for cell in ws[last_data_row]:
                         if cell.has_style:
                             ref[cell.column] = {
                                 "font": copy(cell.font),
@@ -1363,7 +1378,7 @@ class Tools:
                                 "number_format": cell.number_format,
                             }
 
-                start = (ws.max_row or 0) + 1
+                start = last_data_row + 1
                 for i, rd in enumerate(parsed_rows):
                     for j, v in enumerate(rd, 1):
                         cell = ws.cell(row=start + i, column=j)

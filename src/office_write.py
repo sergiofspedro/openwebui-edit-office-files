@@ -14,6 +14,19 @@ from typing import Any, Dict, Optional
 from .constants import *
 from .utils import *
 
+def _last_populated_row(self, ws) -> int:
+    """Return the last row index that actually has a non-empty cell value.
+
+    ws.max_row includes trailing rows that only carry formatting/blank
+    cells, so appending after it can leave a large gap of empty rows
+    before new content when the sheet has such trailing rows.
+    """
+    for row in range(ws.max_row or 0, 0, -1):
+        for cell in ws[row]:
+            if cell.value is not None and str(cell.value).strip() != "":
+                return row
+    return 0
+
 async def add_content(
     self,
     file_id: str,
@@ -69,9 +82,10 @@ async def add_content(
                 return json.dumps({"error": "No rows provided in CSV content"})
 
             # Get reference styles from last row
+            last_data_row = self._last_populated_row(ws)
             ref = {}
-            if ws.max_row and ws.max_row >= 1:
-                for cell in ws[ws.max_row]:
+            if last_data_row >= 1:
+                for cell in ws[last_data_row]:
                     if cell.has_style:
                         ref[cell.column] = {
                             "font": copy(cell.font),
@@ -81,7 +95,7 @@ async def add_content(
                             "number_format": cell.number_format,
                         }
 
-            start = (ws.max_row or 0) + 1
+            start = last_data_row + 1
             for i, rd in enumerate(parsed_rows):
                 for j, v in enumerate(rd, 1):
                     cell = ws.cell(row=start + i, column=j)
@@ -116,9 +130,10 @@ async def add_content(
             if not parsed_rows:
                 return json.dumps({"error": "No rows provided in CSV content"})
 
+            last_data_row = self._last_populated_row(ws)
             ref = {}
-            if ws.max_row and ws.max_row >= 1:
-                for cell in ws[ws.max_row]:
+            if last_data_row >= 1:
+                for cell in ws[last_data_row]:
                     if cell.has_style:
                         ref[cell.column] = {
                             "font": copy(cell.font),
@@ -128,7 +143,7 @@ async def add_content(
                             "number_format": cell.number_format,
                         }
 
-            start = (ws.max_row or 0) + 1
+            start = last_data_row + 1
             for i, rd in enumerate(parsed_rows):
                 for j, v in enumerate(rd, 1):
                     cell = ws.cell(row=start + i, column=j)

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.2] - 2026-08-07
+
+### Fixed
+- **`add_content()` on `.xlsx`/`.xls` inserted new rows after a large gap of empty rows instead
+  of right after the existing data.** It used `ws.max_row` (openpyxl's absolute last row in the
+  sheet, which counts trailing rows that only carry formatting or blank cells) as the insertion
+  point. On a sheet with such trailing rows, new content landed dozens or hundreds of rows below
+  the real data instead of immediately after it. Added a `_last_populated_row(ws)` helper that
+  scans from the bottom of the sheet for the last row with an actual non-empty value, and used it
+  for both the insertion row and the reference-style row (font/fill/border/alignment copied from
+  the last real row, not a blank one) in both the xlsx and xls branches.
+
 ## [3.15.1] - 2026-08-04
 
 ### Fixed
