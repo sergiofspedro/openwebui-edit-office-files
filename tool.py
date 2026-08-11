@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.15.3
+version: 3.15.4
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -785,17 +785,30 @@ def _render_content_slide(prs, lines, colors, hex_to_rgb, add_text_box, add_acce
 # ---------------------------------------------------------------------------
 # Excerpt matching helpers (used by add_comment/add_comments for PDF + DOCX)
 # ---------------------------------------------------------------------------
-def _normalize_match_text(text: str) -> str:
-    """Normalize text for excerpt matching: curly quotes/dashes -> plain, collapse whitespace."""
+_QUOTE_DASH_REPLACEMENTS = {
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "–": "-", "—": "-", "―": "-",
+}
+
+
+def _normalize_chars(text: str) -> str:
+    """Character-for-character normalization (curly quotes/dashes -> plain).
+
+    A 1:1 character mapping, so it never changes string length: offsets computed
+    on the result map exactly back to offsets in the original text. Used where we
+    need to know precisely where a match starts/ends (DOCX run splitting), as
+    opposed to just whether it matches at all.
+    """
     if not text:
         return ""
-    replacements = {
-        "‘": "'", "’": "'", "“": '"', "”": '"',
-        "–": "-", "—": "-", "―": "-",
-    }
-    for src, dst in replacements.items():
+    for src, dst in _QUOTE_DASH_REPLACEMENTS.items():
         text = text.replace(src, dst)
-    return re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _normalize_match_text(text: str) -> str:
+    """Normalize text for excerpt matching: curly quotes/dashes -> plain, collapse whitespace."""
+    return re.sub(r"\s+", " ", _normalize_chars(text)).strip()
 
 
 def _split_on_ellipsis(excerpt: str) -> list:
@@ -812,25 +825,6 @@ def _split_on_ellipsis(excerpt: str) -> list:
     parts = re.split(r"\.\.\.|…", normalized)
     segments = [p.strip() for p in parts if p.strip()]
     return segments or [normalized]
-
-
-def _normalize_chars(text: str) -> str:
-    """Character-for-character normalization (curly quotes/dashes -> plain).
-
-    Unlike _normalize_match_text, this never collapses whitespace or strips the
-    string, so it preserves length: offsets computed on the result map 1:1 back to
-    offsets in the original text. Used where we need to know exactly where a match
-    starts/ends (DOCX run splitting), as opposed to just whether it matches at all.
-    """
-    if not text:
-        return ""
-    replacements = {
-        "‘": "'", "’": "'", "“": '"', "”": '"',
-        "–": "-", "—": "-", "―": "-",
-    }
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
-    return text
 
 
 def _loose_text_pattern(candidate: str) -> str:
@@ -5525,8 +5519,12 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                     May contain "..." to mark omitted text between two quoted spans.
                 match_index: If excerpt appears more than once, which occurrence to use
                     (1-based, default 1)
-                page_num: PDF only -- required if excerpt is omitted or not found
-                paragraph_index: DOCX only -- required if excerpt is omitted or not found
+                page_num: PDF only -- always required. Unlike DOCX, excerpt search is scoped
+                    to a single page, so page_num says which page to search (and is also the
+                    fallback position if the excerpt isn't found there).
+                paragraph_index: DOCX only -- optional. DOCX excerpt search scans the whole
+                    document, so this is only used as a fallback if excerpt is omitted or
+                    not found anywhere.
         """
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
