@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.15.3** | `add_comment`/`add_comments` can now locate a quoted `excerpt` in a PDF or DOCX and anchor the comment there — PDF gets a highlight over the exact text, DOCX splits the run so the comment covers just that span, not the whole paragraph. Handles `"..."` in excerpts and curly vs. straight quotes. `add_comments` batch now supports DOCX, not just PDF. |
 | **v3.15.2** | Fix `add_content()` inserting new spreadsheet rows after trailing empty rows instead of right after the real data |
 | **v3.12.0** | PDF comments with author names via PyMuPDF sticky notes |
 | **v3.11.2** | Fix duplicate PPTX comment ext URI on repeat calls + modular src/ package split |
@@ -95,7 +96,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 | 51 | `create_file` *(updated)* | .docx | Markdown parsing for headings, bullets, inline formatting |
 | 52 | `create_odf` *(updated)* | .odt .ods .odp | Now accepts `raw_text=True` to skip auto-formatting |
 
-**Total: 71 functions (52 documented core functions + 19 internal helpers)**
+**Total: 80 functions (52 documented core functions + 28 internal helpers)**
 
 ### LibreOffice ODF Support (v3.1.0)
 
@@ -200,6 +201,42 @@ manage_revisions(file_id, action="accept_all")
 | Microsoft Word | Yes — 100% native support |
 | LibreOffice | Yes — good OOXML revision support |
 | Google Docs | Partial — opens .docx but may drop metadata |
+
+### Excerpt-anchored comments (v3.15.3)
+
+`add_comment`/`add_comments` accept an optional `excerpt` — instead of guessing a page
+number or paragraph index, give the exact quoted text and the comment is anchored to it:
+a yellow highlight over the matched text in PDF, or a precisely split run in DOCX so the
+comment covers just that quote, not the whole paragraph.
+
+```python
+# Single comment, anchored to an exact quote (PDF)
+add_comment(
+    file_id, text="CRITICAL: this contradicts Ch.8's approach.",
+    author="Sérgio Pedro", page_num=12,
+    excerpt="pattern-based comparative organisational ethnography... inspired by Christopher Alexander's pattern languages and Merton's middle-range theory",
+)
+
+# Many comments in one file, mixing PDF and DOCX excerpts in the same shape
+add_comments(file_id, comments=[
+    {"excerpt": "ecology of knowledges", "text": "...", "author": "Sérgio Pedro", "page_num": 14},
+    {"excerpt": "layered narrative approach", "text": "...", "author": "Sérgio Pedro", "page_num": 40},
+])
+```
+
+Notes:
+- `excerpt` may contain `"..."` to mark text omitted between two quoted spans (common when
+  quoting a long passage) — the omitted middle is never searched for literally; the tool
+  matches the text before the `"..."` and flags the result as a partial match.
+- Curly ("smart") vs. straight quotes in the excerpt vs. the source document are handled
+  automatically.
+- If `excerpt` doesn't match anything, the tool falls back to `page_num` (PDF, fixed
+  position) or `paragraph_index` (DOCX, whole paragraph) — the old behavior — and reports a
+  warning instead of silently mis-placing the comment.
+- `match_index` (default 1) picks which occurrence to use when the excerpt appears more
+  than once.
+- DOCX excerpts that cross a formatting boundary (e.g. part bold, part not) anchor to the
+  smallest set of runs covering the quote, which may be slightly wider than the exact text.
 
 ### Format Support
 
