@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.15.2
+version: 3.15.3
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -781,12 +781,90 @@ def _render_content_slide(prs, lines, colors, hex_to_rgb, add_text_box, add_acce
         if y_pos > 6.5:
             break
 
+
+# ---------------------------------------------------------------------------
+# Excerpt matching helpers (used by add_comment/add_comments for PDF + DOCX)
+# ---------------------------------------------------------------------------
+def _normalize_match_text(text: str) -> str:
+    """Normalize text for excerpt matching: curly quotes/dashes -> plain, collapse whitespace."""
+    if not text:
+        return ""
+    replacements = {
+        "‘": "'", "’": "'", "“": '"', "”": '"',
+        "–": "-", "—": "-", "―": "-",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _split_on_ellipsis(excerpt: str) -> list:
+    """Split an excerpt on literal '...'/'…' markers (denoting omitted text).
+
+    Returns a list of non-empty, normalized segments in order. A single-element
+    list means the excerpt has no ellipsis. Callers should try the full excerpt
+    (segments joined) first, and fall back to segments[0] if that fails to match --
+    since PDFs/DOCX never contain the literal omission marker itself.
+    """
+    normalized = _normalize_match_text(excerpt)
+    if not normalized:
+        return []
+    parts = re.split(r"\.\.\.|…", normalized)
+    segments = [p.strip() for p in parts if p.strip()]
+    return segments or [normalized]
+
+
+def _normalize_chars(text: str) -> str:
+    """Character-for-character normalization (curly quotes/dashes -> plain).
+
+    Unlike _normalize_match_text, this never collapses whitespace or strips the
+    string, so it preserves length: offsets computed on the result map 1:1 back to
+    offsets in the original text. Used where we need to know exactly where a match
+    starts/ends (DOCX run splitting), as opposed to just whether it matches at all.
+    """
+    if not text:
+        return ""
+    replacements = {
+        "‘": "'", "’": "'", "“": '"', "”": '"',
+        "–": "-", "—": "-", "―": "-",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return text
+
+
+def _loose_text_pattern(candidate: str) -> str:
+    """Build a regex from a whitespace-collapsed candidate, treating any run of
+    whitespace in the target text as flexible (matches single/double spaces, line
+    wraps, tabs -- whatever the source document happens to use)."""
+    parts = [p for p in candidate.split(" ") if p]
+    if not parts:
+        return ""
+    return r"\s+".join(re.escape(p) for p in parts)
+
+
+def _quote_style_variants(straight_text: str) -> list:
+    """Return quote-style variants of an already whitespace-normalized, straight-quote
+    string, for matching against text we can't normalize ourselves (PDF page content
+    via PyMuPDF's search_for). Order: as given, then a curly-quote guess (naive: every
+    ' becomes a right single quote, and "..." pairs become left/right double quotes --
+    good enough for the common case of at most one quoted span per excerpt)."""
+    variants = [straight_text]
+    if "'" in straight_text or '"' in straight_text:
+        curly = straight_text.replace("'", "’")
+        curly = re.sub(r'"([^"]*)"', "“\\1”", curly)
+        if curly != straight_text:
+            variants.append(curly)
+    return variants
+
+
 __all__ = [
     "_office_plugins", "register_office_plugin", "_call_office_plugins",
     "_resolve_file_path", "_read_file_bytes", "_detect_type", "_cell_value",
     "_xls_to_xlsx", "_format_text", "_parse_inline_md", "_encode_filename",
     "_decode_filename", "_read_odf", "_add_callout_box", "_add_professional_table",
-    "_render_content_slide",
+    "_render_content_slide", "_normalize_match_text", "_split_on_ellipsis",
+    "_normalize_chars", "_loose_text_pattern", "_quote_style_variants",
 ]
 
 # =========================================================================
@@ -4949,22 +5027,31 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
     # === v3.6.0: Collaboration Features ===
 
-    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, page_num: int = 1, __user__=None, __request__=None) -> str:
+    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, page_num: int = 1, excerpt: str = "", match_index: int = 1, __user__=None, __request__=None) -> str:
         """Add a review comment to a Word, Excel, PowerPoint, or PDF file.
 
         Each call starts from file_id's original content and saves a new, independent file --
         it does not accumulate onto a previous add_comment output. To add another comment on top
         of one you just added, pass the file_id returned by that call. For adding many comments
-        to the same PDF in one go, use add_comments() instead.
+        to the same PDF or DOCX in one go, use add_comments() instead.
 
         Args:
             file_id: File ID to comment on
             text: Comment text
             author: Name shown in the comment (e.g., "Sergio Pedro")
-            paragraph_index: For DOCX: paragraph index to attach comment to (default 0)
+            paragraph_index: For DOCX: paragraph index to attach comment to. Used only if
+                excerpt is empty or not found (default 0)
             cell_ref: For XLSX: cell reference (default "A1")
             slide_num: For PPTX: slide number (default 1)
-            page_num: For PDF: page number to attach comment to (default 1)
+            page_num: For PDF: page number to search on. Required for PDF; used as-is when
+                excerpt is empty (default 1)
+            excerpt: For DOCX/PDF: exact quoted text to locate and anchor the comment to.
+                Recommended over paragraph_index/fixed positioning -- highlights the matched
+                text (PDF) or the matched run(s) (DOCX) instead of the whole paragraph/page.
+                May contain "..." to mark text omitted between two quoted spans; the omitted
+                middle is never searched for literally.
+            match_index: If excerpt appears more than once, which occurrence to use
+                (1-based, default 1)
         """
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
@@ -4973,23 +5060,16 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         if ftype == "docx":
             from docx import Document
             doc = Document(io.BytesIO(file_bytes))
-
-            # Ensure we have a paragraph (with at least one run) to anchor the comment to
-            if not doc.paragraphs:
-                doc.add_paragraph("")
-            if paragraph_index >= len(doc.paragraphs):
-                paragraph_index = 0
-            para = doc.paragraphs[paragraph_index]
-            if not para.runs:
-                para.add_run("")
-
-            # python-docx's Document.add_comment(runs, text=..., author=...) anchors the
-            # comment to a Run or sequence of Runs -- it does NOT take the comment text as
-            # its first argument (that's the `text=` kwarg).
-            doc.add_comment(para.runs, text=text, author=author)
+            err, warning = self._docx_add_comment(doc, text, author, excerpt=excerpt, match_index=match_index, paragraph_index=paragraph_index)
+            if err:
+                return json.dumps({"error": err})
             buf = io.BytesIO(); doc.save(buf); buf.seek(0)
             url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
-            if url: return f"Comment added by {author} on paragraph {paragraph_index}: [{fname}]({url})"
+            if url:
+                msg = f"Comment added by {author}: [{fname}]({url})"
+                if warning:
+                    msg += f"\nWarning: {warning}"
+                return msg
             return json.dumps({"error": self._err("could_not_save")})
 
         elif ftype == "xlsx":
@@ -5206,7 +5286,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             try:
                 import fitz
                 pdf = fitz.open(stream=file_bytes, filetype="pdf")
-                err = self._pdf_add_text_annot(pdf, page_num, text, author)
+                err, warning = self._pdf_add_comment_annot(pdf, page_num, text, author, excerpt=excerpt, match_index=match_index)
                 if err:
                     pdf.close()
                     return json.dumps({"error": err})
@@ -5216,7 +5296,10 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 buf.seek(0)
                 url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
                 if url:
-                    return f"Comment added by {author} on page {page_num}: [{fname}]({url})"
+                    msg = f"Comment added by {author} on page {page_num}: [{fname}]({url})"
+                    if warning:
+                        msg += f"\nWarning: {warning}"
+                    return msg
                 return json.dumps({"error": self._err("could_not_save")})
             except Exception as e:
                 return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
@@ -5224,67 +5307,308 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         else:
             return json.dumps({"error": f"Comments not supported for {ftype}. Supported: DOCX, XLSX, PPTX, PDF."})
 
-    def _pdf_add_text_annot(self, pdf, page_num: int, text: str, author: str) -> Optional[str]:
-        """Add one text annotation to an already-open fitz PDF. Returns an error string, or None on success."""
-        import fitz
-        if page_num < 1 or page_num > pdf.page_count:
-            return f"Page {page_num} not found in PDF (has {pdf.page_count} pages)."
-        page = pdf.load_page(page_num - 1)
-        annot = page.add_text_annot(fitz.Point(72, 72), text)
-        annot.set_info(title=author, content=text, subject="Comment")
-        return None
+    def _pdf_find_excerpt_quads(self, page, excerpt: str, match_index: int = 1):
+        """Search for an excerpt's text on a fitz Page.
 
-    async def add_comments(self, file_id: str, comments: list, __user__=None, __request__=None) -> str:
-        """Add multiple review comments to a PDF in one call, producing a single output file.
+        Handles excerpts containing '...'/'…' (which mark text omitted between two
+        quoted spans and never appear literally in the source file): tries the full
+        normalized excerpt first, then falls back to just the text before the first
+        ellipsis.
 
-        Use this instead of calling add_comment() repeatedly -- each add_comment call starts
-        fresh from the original file, so 28 calls would produce 28 separate single-comment PDFs
-        instead of one PDF with 28 comments. This opens the PDF once, applies every comment, and
-        saves once.
+        `page.search_for` matches the PDF's literal embedded text -- we can only
+        normalize our query, not the PDF content -- so for each candidate we try a
+        few quote-style variants (straight, as-given, and a curly-quote guess),
+        since professionally typeset PDFs commonly use smart quotes that a
+        copy-pasted excerpt (usually straight quotes) won't match verbatim.
 
-        Args:
-            file_id: File ID of the PDF to comment on
-            comments: List of {"page_num": int, "text": str, "author": str (optional)} dicts
+        Returns (rects: list[fitz.Rect], partial: bool) on a match, or (None, False)
+        if nothing was found.
+        """
+        segments = _split_on_ellipsis(excerpt)
+        if not segments:
+            return None, False
+
+        candidates = [(_normalize_match_text(excerpt), False)]
+        if len(segments) > 1 and segments[0] != candidates[0][0]:
+            candidates.append((segments[0], True))
+
+        for candidate_text, partial in candidates:
+            if not candidate_text:
+                continue
+            for variant in _quote_style_variants(candidate_text):
+                rects = page.search_for(variant)
+                if rects:
+                    idx = match_index - 1
+                    rect = rects[idx] if 0 <= idx < len(rects) else rects[0]
+                    return [rect], partial
+        return None, False
+
+    def _pdf_add_comment_annot(self, pdf, page_num: int, text: str, author: str, excerpt: str = "", match_index: int = 1):
+        """Add one comment annotation to an already-open fitz PDF.
+
+        Without `excerpt`: sticky-note icon at a fixed default position (legacy behavior).
+        With `excerpt`: highlights the matched text on the page and attaches the comment
+        to that highlight -- clicking it in a PDF reader shows author + text, same as a
+        manual "select text, add comment" in Acrobat/Preview. If the excerpt can't be
+        found on the page, falls back to the sticky note and reports a warning instead of
+        silently mis-placing the comment.
+
+        Returns (error: Optional[str], warning: Optional[str]).
         """
         import fitz
+        if page_num < 1 or page_num > pdf.page_count:
+            return f"Page {page_num} not found in PDF (has {pdf.page_count} pages).", None
+        page = pdf.load_page(page_num - 1)
+
+        if excerpt:
+            rects, partial = self._pdf_find_excerpt_quads(page, excerpt, match_index)
+            if rects:
+                annot = page.add_highlight_annot(rects)
+                annot.set_info(title=author, content=text, subject="Comment")
+                warning = "Matched only the text before the '...' in the excerpt -- verify placement." if partial else None
+                return None, warning
+            annot = page.add_text_annot(fitz.Point(72, 72), text)
+            annot.set_info(title=author, content=text, subject="Comment")
+            return None, f"Excerpt not found on page {page_num} -- placed a default sticky note instead of highlighting the text."
+
+        annot = page.add_text_annot(fitz.Point(72, 72), text)
+        annot.set_info(title=author, content=text, subject="Comment")
+        return None, None
+
+    def _docx_find_excerpt_runs(self, doc, excerpt: str, match_index: int = 1):
+        """Locate an excerpt across a DOCX's body paragraphs and table cells.
+
+        Returns (paragraph, runs, single_run_offsets, partial):
+            paragraph: the matched Paragraph, or None if nothing matched
+            runs: list of Run objects overlapping the match
+            single_run_offsets: (run, local_start, local_end) when the excerpt fits
+                entirely inside one run (enabling a precise split into just that
+                span); None when the match spans a run boundary
+            partial: True if only the text before the excerpt's '...' was matched
+
+        Returns (None, None, None, False) if the excerpt wasn't found anywhere.
+        """
+        segments = _split_on_ellipsis(excerpt)
+        if not segments:
+            return None, None, None, False
+
+        full_candidate = _normalize_match_text(excerpt)
+        candidates = [(full_candidate, False)]
+        if len(segments) > 1 and segments[0] != full_candidate:
+            candidates.append((segments[0], True))
+
+        paragraphs = list(doc.paragraphs)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    paragraphs.extend(cell.paragraphs)
+
+        for candidate_text, partial in candidates:
+            pattern = _loose_text_pattern(candidate_text)
+            if not pattern:
+                continue
+            occurrence = 0
+            for para in paragraphs:
+                if not para.runs:
+                    continue
+                run_spans = []
+                normalized_parts = []
+                pos = 0
+                for run in para.runs:
+                    norm = _normalize_chars(run.text)
+                    run_spans.append((run, pos, pos + len(norm)))
+                    normalized_parts.append(norm)
+                    pos += len(norm)
+                para_text = "".join(normalized_parts)
+
+                for m in re.finditer(pattern, para_text):
+                    occurrence += 1
+                    if occurrence != match_index:
+                        continue
+                    start, end = m.start(), m.end()
+                    overlapping = [r for (r, rs, rend) in run_spans if rs < end and rend > start]
+                    if len(overlapping) == 1:
+                        run, rs, rend = next(t for t in run_spans if t[0] is overlapping[0])
+                        return para, overlapping, (run, start - rs, end - rs), partial
+                    return para, overlapping, None, partial
+
+        return None, None, None, False
+
+    def _docx_split_run_at(self, run, start: int, end: int):
+        """Split `run` into up to 3 sibling runs at [start:end), preserving formatting.
+
+        Returns the run containing exactly text[start:end] -- the piece to anchor a
+        comment to. If the span already covers the whole run, returns it unchanged.
+        """
+        from copy import deepcopy
+        from docx.text.run import Run
+
+        text = run.text
+        if start <= 0 and end >= len(text):
+            return run
+
+        before, middle, after = text[:start], text[start:end], text[end:]
+        src_element = run._r
+        parent = run._parent
+
+        middle_element = deepcopy(src_element)
+        src_element.addnext(middle_element)
+
+        if after:
+            after_element = deepcopy(src_element)
+            middle_element.addnext(after_element)
+            Run(after_element, parent).text = after
+
+        Run(middle_element, parent).text = middle
+
+        if before:
+            Run(src_element, parent).text = before
+        else:
+            src_element.getparent().remove(src_element)
+
+        return Run(middle_element, parent)
+
+    def _docx_add_comment(self, doc, text: str, author: str, excerpt: str = "", match_index: int = 1, paragraph_index=None):
+        """Attach a comment to an already-open python-docx Document (not yet saved).
+
+        With `excerpt`: locates the exact quoted text (paragraphs + table cells) and
+        anchors the comment to just that span when it fits in one run, or to the
+        minimal set of overlapping runs when the quote crosses a formatting boundary.
+        Falls back to `paragraph_index` (whole-paragraph, legacy behavior) with a
+        warning if the excerpt isn't found -- never silently mis-places the comment.
+        Without `excerpt`: behaves exactly as before (whole-paragraph anchor).
+
+        Returns (error: Optional[str], warning: Optional[str]).
+        """
+        fallback_warning = None
+        if excerpt:
+            para, runs, single_offsets, partial = self._docx_find_excerpt_runs(doc, excerpt, match_index)
+            if runs:
+                if single_offsets:
+                    run, local_start, local_end = single_offsets
+                    target_run = self._docx_split_run_at(run, local_start, local_end)
+                    doc.add_comment([target_run], text=text, author=author)
+                    warning = "Matched only the text before the '...' in the excerpt -- verify placement." if partial else None
+                else:
+                    doc.add_comment(runs, text=text, author=author)
+                    warning = "Excerpt spans a formatting boundary -- comment covers a slightly wider span than the exact quote."
+                    if partial:
+                        warning = "Matched only the text before the '...', and the match spans a formatting boundary -- verify placement."
+                return None, warning
+            fallback_warning = "Excerpt not found in the document -- fell back to paragraph_index."
+
+        idx = paragraph_index if paragraph_index is not None else 0
+        if not doc.paragraphs:
+            doc.add_paragraph("")
+        if idx >= len(doc.paragraphs) or idx < 0:
+            idx = 0
+        para = doc.paragraphs[idx]
+        if not para.runs:
+            para.add_run("")
+        doc.add_comment(para.runs, text=text, author=author)
+        return None, fallback_warning
+
+    async def add_comments(self, file_id: str, comments: list, __user__=None, __request__=None) -> str:
+        """Add multiple review comments to a PDF or DOCX in one call, producing a single output file.
+
+        Use this instead of calling add_comment() repeatedly -- each add_comment call starts
+        fresh from the original file, so 28 calls would produce 28 separate single-comment files
+        instead of one file with 28 comments. This opens the document once, applies every
+        comment, and saves once.
+
+        Args:
+            file_id: File ID of the PDF or DOCX to comment on
+            comments: List of dicts. Each entry supports:
+                text: Comment text (required)
+                author: Reviewer name (optional, default "Reviewer")
+                excerpt: Exact quoted text to locate and anchor the comment to (recommended).
+                    May contain "..." to mark omitted text between two quoted spans.
+                match_index: If excerpt appears more than once, which occurrence to use
+                    (1-based, default 1)
+                page_num: PDF only -- required if excerpt is omitted or not found
+                paragraph_index: DOCX only -- required if excerpt is omitted or not found
+        """
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
             return json.dumps({"error": self._err("file_not_found")})
-        if ftype != "pdf":
-            return json.dumps({"error": f"add_comments only supports PDF. Got: {ftype}. Use add_comment for other formats."})
+        if ftype not in ("pdf", "docx"):
+            return json.dumps({"error": f"add_comments only supports PDF and DOCX. Got: {ftype}. Use add_comment for other formats."})
         if not comments:
             return json.dumps({"error": "comments list is empty"})
 
-        pdf = fitz.open(stream=file_bytes, filetype="pdf")
-        applied = 0
-        errors = []
-        for i, c in enumerate(comments):
-            page_num = c.get("page_num")
-            text = c.get("text")
-            author = c.get("author", "Reviewer")
-            if page_num is None or text is None:
-                errors.append(f"entry {i}: missing page_num or text")
-                continue
-            err = self._pdf_add_text_annot(pdf, page_num, text, author)
-            if err:
-                errors.append(f"entry {i}: {err}")
-            else:
+        if ftype == "pdf":
+            import fitz
+            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            applied = 0
+            errors = []
+            warnings = []
+            for i, c in enumerate(comments):
+                page_num = c.get("page_num")
+                text = c.get("text")
+                author = c.get("author", "Reviewer")
+                excerpt = c.get("excerpt", "")
+                match_index = c.get("match_index", 1)
+                if text is None:
+                    errors.append(f"entry {i}: missing text")
+                    continue
+                if page_num is None:
+                    errors.append(f"entry {i}: missing page_num")
+                    continue
+                err, warning = self._pdf_add_comment_annot(pdf, page_num, text, author, excerpt=excerpt, match_index=match_index)
+                if err:
+                    errors.append(f"entry {i}: {err}")
+                    continue
                 applied += 1
+                if warning:
+                    warnings.append(f"entry {i}: {warning}")
 
-        if applied == 0:
+            if applied == 0:
+                pdf.close()
+                return json.dumps({"error": "No comments applied", "details": errors})
+
+            buf = io.BytesIO()
+            pdf.save(buf)
             pdf.close()
-            return json.dumps({"error": "No comments applied", "details": errors})
+            buf.seek(0)
 
-        buf = io.BytesIO()
-        pdf.save(buf)
-        pdf.close()
-        buf.seek(0)
+        else:  # docx
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            applied = 0
+            errors = []
+            warnings = []
+            for i, c in enumerate(comments):
+                text = c.get("text")
+                author = c.get("author", "Reviewer")
+                excerpt = c.get("excerpt", "")
+                match_index = c.get("match_index", 1)
+                paragraph_index = c.get("paragraph_index")
+                if text is None:
+                    errors.append(f"entry {i}: missing text")
+                    continue
+                err, warning = self._docx_add_comment(doc, text, author, excerpt=excerpt, match_index=match_index, paragraph_index=paragraph_index)
+                if err:
+                    errors.append(f"entry {i}: {err}")
+                    continue
+                applied += 1
+                if warning:
+                    warnings.append(f"entry {i}: {warning}")
+
+            if applied == 0:
+                return json.dumps({"error": "No comments applied", "details": errors})
+
+            buf = io.BytesIO()
+            doc.save(buf)
+            buf.seek(0)
+
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
         if not url:
             return json.dumps({"error": self._err("could_not_save")})
         result = f"Added {applied} comment(s) to [{fname}]({url})"
         if errors:
             result += f"\n{len(errors)} entries skipped: {'; '.join(errors)}"
+        if warnings:
+            result += f"\n{len(warnings)} warning(s): {'; '.join(warnings)}"
         return result
 
     async def version_diff(self, file_id: str, version_label: str = "") -> str:

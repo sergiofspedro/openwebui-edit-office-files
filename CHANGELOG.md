@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.3] - 2026-08-11
+
+### Added
+- **`add_comment`/`add_comments` accept an optional `excerpt` (+ `match_index`) to anchor a
+  comment to exact quoted text instead of a fixed page number (PDF) or whole paragraph
+  (DOCX).** PDF: highlights the matched text and attaches the comment to that highlight
+  (falls back to the previous fixed-position sticky note, with a warning, if the excerpt
+  isn't found on the page). DOCX: splits the matching run so the comment covers just the
+  quoted span — or the minimal set of overlapping runs if the quote crosses a formatting
+  boundary — falling back to `paragraph_index` with a warning if not found. Handles `"..."`
+  inside excerpts (marks text omitted between two quoted spans; matches the text before it
+  and reports a partial match) and curly vs. straight quote differences between the excerpt
+  and the source document. All new parameters are optional and default to the prior
+  behavior, so existing calls are unaffected.
+- **`add_comments` (batch) now supports DOCX**, not just PDF — opens the document once,
+  applies every comment (each entry may use `excerpt` or `paragraph_index`), and saves once,
+  same as the existing PDF batch path.
+
 ## [3.15.2] - 2026-08-07
 
 ### Fixed
