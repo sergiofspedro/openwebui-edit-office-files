@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.4] - 2026-08-11
+
+### Fixed
+- **`add_comments`'s docstring said `page_num` (PDF) was only required "if excerpt is
+  omitted or not found," but the code always required it** — PDF excerpt search is scoped
+  to a single page (unlike DOCX, which scans the whole document), so `page_num` was never
+  actually optional. Corrected the docstring for both `page_num` (PDF, always required) and
+  `paragraph_index` (DOCX, genuinely optional/fallback-only) to match actual behavior.
+  (Flagged by Sourcery review on #8.)
+- Typo in README: "mis-placing" -> "misplacing". (Flagged by Sourcery review on #8.)
+
+### Changed
+- Consolidated the duplicated quote/dash replacement map in `_normalize_match_text` and
+  `_normalize_chars` into a single `_QUOTE_DASH_REPLACEMENTS` dict, with `_normalize_chars`
+  as the core 1:1 (offset-preserving) primitive and `_normalize_match_text` as a thin
+  wrapper that additionally collapses whitespace. No behavior change. (Flagged by Sourcery
+  review on #8.)
+
 ## [3.15.3] - 2026-08-11
 
 ### Added
