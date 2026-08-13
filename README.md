@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v3.15.5** | Strengthened tool-selection wording so a calling model picks `add_comments` (one file for N comments) over calling `add_comment` in a loop (N separate files) — moved the guidance to the first line of both docstrings plus the plugin description. No logic changed. |
 | **v3.15.4** | Docs fix: `add_comments`'s `page_num` (PDF) is always required, not just when excerpt is missing — docstring corrected to match. Plus a README typo fix and an internal cleanup of the excerpt-matching helpers (no behavior change). |
 | **v3.15.3** | `add_comment`/`add_comments` can now locate a quoted `excerpt` in a PDF or DOCX and anchor the comment there — PDF gets a highlight over the exact text, DOCX splits the run so the comment covers just that span, not the whole paragraph. Handles `"..."` in excerpts and curly vs. straight quotes. `add_comments` batch now supports DOCX, not just PDF. |
 | **v3.15.2** | Fix `add_content()` inserting new spreadsheet rows after trailing empty rows instead of right after the real data |

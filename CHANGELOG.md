@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.5] - 2026-08-11
+
+### Changed
+- **Strengthened the tool-selection wording for `add_comment` vs. `add_comments`.** `add_comments`
+  (batch, one call = one output file with all comments) already existed and worked correctly, but
+  a user reported the calling model chose to call `add_comment` 16 times instead — producing 16
+  separate single-comment files — when asked to add 16 comments in one message. Root cause: the
+  guidance to use `add_comments` for 2+ comments was on the 3rd line of `add_comment`'s docstring,
+  not the first, and the plugin's top-level `description:` (the most global text Open WebUI shows a
+  model) didn't mention it at all. Moved the warning to the first line of both `add_comment`'s and
+  `add_comments`' docstrings, and added a short mention to the plugin `description:` metadata. No
+  logic changed -- `add_comments` already did the right thing; this only makes it more likely a
+  tool-selecting model picks it for multi-comment requests.
+
 ## [3.15.4] - 2026-08-11
 
 ### Fixed
