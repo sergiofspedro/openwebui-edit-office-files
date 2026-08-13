@@ -2,8 +2,8 @@
 title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
-description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.15.4
+description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
+version: 3.15.5
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -5022,7 +5022,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     # === v3.6.0: Collaboration Features ===
 
     async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, page_num: int = 1, excerpt: str = "", match_index: int = 1, __user__=None, __request__=None) -> str:
-        """Add a review comment to a Word, Excel, PowerPoint, or PDF file.
+        """Add ONE review comment to a Word, Excel, PowerPoint, or PDF file -- for 2+ comments,
+        call add_comments() instead (one call, one output file); calling add_comment() in a
+        loop creates a separate file per comment, not one file with all the comments.
 
         Each call starts from file_id's original content and saves a new, independent file --
         it does not accumulate onto a previous add_comment output. To add another comment on top
@@ -5503,7 +5505,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return None, fallback_warning
 
     async def add_comments(self, file_id: str, comments: list, __user__=None, __request__=None) -> str:
-        """Add multiple review comments to a PDF or DOCX in one call, producing a single output file.
+        """Add MULTIPLE review comments to a PDF or DOCX in ONE call -- this is the right choice
+        whenever there is more than one comment to add, producing a single output file instead
+        of one file per comment.
 
         Use this instead of calling add_comment() repeatedly -- each add_comment call starts
         fresh from the original file, so 28 calls would produce 28 separate single-comment files
