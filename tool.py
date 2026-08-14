@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 3.15.6
+version: 3.15.7
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -1139,8 +1139,9 @@ class Tools:
             file_id: The Open WebUI file ID (UUID) or filename
             max_rows: Maximum rows to return (default 500)
             sheet_name: Optional - read only this sheet (xlsx/xls only)
-            row_start: Starting row (1-indexed, default 1)
-            row_end: Ending row (0 = use max_rows limit)
+            row_start: Starting row (1-indexed, default 1) -- xlsx/xls only, ignored for
+                csv/docx/pptx (csv is limited only by max_rows; docx/pptx have no row concept)
+            row_end: Ending row (0 = use max_rows limit) -- xlsx/xls only, same as row_start
         """
         try:
             file_data = _read_file_bytes(file_id)
@@ -1347,7 +1348,9 @@ class Tools:
         For spreadsheets (xlsx): content is CSV text with rows to add.
         For documents (docx): content is text to append at the end. Preserves original
             formatting and capitalization of the existing document.
-        For presentations (pptx): each line defines a new slide. Use "---" as separator between slides.
+        For presentations (pptx): content is split into slides on "---" lines. Within each
+            "---"-separated block, the FIRST line becomes that slide's title and the remaining
+            lines become its body text -- it is not one slide per line.
 
         Args:
             file_id: File ID to edit
@@ -1889,10 +1892,13 @@ class Tools:
         __user__=None,
         __request__=None,
     ) -> str:
-        """Add password protection to an XLSX or DOCX file.
-
-        For XLSX: uses openpyxl workbook protection. For DOCX: uses write protection.
-        Install msoffcrypto-tool (pip install msoffcrypto-tool) for encryption support.
+        """Add a structural edit-lock to an XLSX or DOCX file. This does NOT encrypt the file
+        or restrict opening it -- anyone can still open and read it in Excel/Word without the
+        password. It only sets a workbook/worksheet protection flag (xlsx, via openpyxl) or a
+        document-protection flag (docx) that restricts editing within the app, which is a much
+        weaker guarantee than real password encryption and can be removed by re-saving the file
+        or by tools that ignore the flag. Do not use this for anything that needs a genuine
+        opening password.
 
         Args:
             file_id: The file ID of the Office file to protect
@@ -1994,7 +2000,9 @@ class Tools:
         For xlsx: content is CSV with headers on first line.
         For docx: supports markdown formatting — headings (#, ##, ###), bullets (-, *),
             and inline markdown (**bold**, *italic*, `code`).
-        For pptx: each line defines a slide. Use "---" as separator between slides.
+        For pptx: content is split into slides on "---" lines. Within each "---"-separated
+            block, the FIRST line becomes that slide's title and the remaining lines become its
+            body text -- it is not one slide per line.
 
         Args:
             file_type: 'xlsx', 'docx', or 'pptx'
@@ -2166,11 +2174,29 @@ class Tools:
 
 
     async def generate_document(self, content: str, title: str = "Document", theme: str = "professional", typography: str = "modern", raw_text: bool = False, __user__=None, __request__=None) -> str:
-        """Generate a professional Word document with modern styling, emojis, cards, and visual elements.
+        """Generate a professional Word document with modern styling, emojis, cards, and visual
+        elements. Prefer this over add_content/create_file for docx when you want rich visual
+        formatting -- those two only support plain markdown (headings/bold/italic/lists/tables).
 
         Headings preserve their original capitalization (no forced sentence case).
         Body text uses sentence case (first letter of each sentence capitalized, acronyms preserved).
         Supports inline markdown: **bold**, *italic*, `code`, [links](url), and ```code blocks```.
+
+        Additional line-level patterns are auto-detected and rendered as rich visual elements
+        (each must be on its own line; consecutive matching lines are grouped into one element):
+        - Card box: a line starting with "> " (optionally "> 🎯 **Title**" on the first line)
+        - KPI cards: a line containing both "|" and "%", e.g. "85% | Customer Satisfaction"
+        - Timeline: pipe-delimited lines starting with an emoji/4-digit year, e.g.
+          "📅 2024 | Event", or colon/dash date lines like "Jan 15: Event" / "2024 - Event"
+        - Step guide: 3+ consecutive numbered lines ("1. Step one") get step-badge styling;
+          fewer than 3 render as plain numbered paragraphs instead
+        - Pull quote: a line wrapped in straight double quotes, followed by an "— Author" line
+        - Comparison table: markdown pipe-table syntax "| Feature | A | B |" (yes/no/partial
+          values get auto ✅/❌/⚠️ icons)
+        - Progress bar: a "Label: NN%" line
+        - Status badge: a line starting with "@success", "@warning", "@danger", or "@info"
+        - Visual separator: a bare "---", "***", or "..." line
+        - Bullet lines ("- "/"* ") get an auto icon based on leading keywords (done/fail/warn/note/idea)
 
         Args:
             content: Markdown content to convert to a document
@@ -3213,8 +3239,11 @@ class Tools:
     async def tracked_change(self, file_id: str, change_type: str, content: str, author: str = "Reviewer", paragraph_index: int = -1, output_filename: str = "", __user__=None, __request__=None) -> str:
         """Apply tracked changes (redlines) to a Word document with custom author name.
         Preserves original formatting and capitalization of the existing document.
-    
-        change_type: replace (use old_text|||new_text), insert (append text with redline), delete (mark paragraph for deletion)
+        DOCX only -- returns an error for any other format.
+
+        change_type: replace (use old_text|||new_text), insert (append text with redline; note
+        this always appends the new paragraph at the END of the document -- paragraph_index is
+        ignored for insert), delete (mark paragraph at paragraph_index for deletion)
         author: Name shown in Word's Track Changes (e.g., "Sergio Pedro")
         """
         try:
@@ -3282,6 +3311,14 @@ class Tools:
 
 
     async def merge_sheets(self, file_ids: str, output_filename: str = "", __user__=None, __request__=None) -> str:
+        """Merge every sheet from multiple Excel (.xlsx) files into one new workbook, preserving
+        cell styles. Each source sheet is renamed "<source_filename>_<original_sheet_name>" in
+        the output so sheets from different files never collide.
+
+        Args:
+            file_ids: Comma-separated list of file IDs to merge, e.g. "id1,id2,id3"
+            output_filename: Optional output filename (default "merged_workbook.xlsx")
+        """
         try:
             import sqlite3 as s3, openpyxl, io, os
             from copy import copy
@@ -3335,6 +3372,18 @@ class Tools:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def batch_process(self, file_ids: str, operation: str, params: str = "", output_filename: str = "", __user__=None, __request__=None) -> str:
+        """Apply the same operation to multiple files in one call.
+
+        Args:
+            file_ids: Comma-separated list of file IDs, e.g. "id1,id2,id3"
+            operation: Only two operations are supported:
+                "replace" -- find-and-replace text. params must be "old_text|||new_text".
+                "add_rows" -- append CSV rows (xlsx) via add_content(). params is the CSV content.
+                Any other value returns an "unsupported operation" result for every file.
+            params: Operation-specific payload, format depends on `operation` (see above).
+            output_filename: Not currently used by either operation (each file keeps its own
+                per-function output naming).
+        """
         try:
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             results = []
@@ -3356,6 +3405,11 @@ class Tools:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def auto_backup(self, __user__=None, __request__=None) -> str:
+        """Create a timestamped backup copy of the entire Open WebUI database (webui.db) --
+        not just this plugin's files. Useful to call before a risky bulk operation
+        (batch_process, bulk_folder_ops with delete_old, etc.). Takes no parameters; each call
+        writes a new "webui_backup_<timestamp>.db" file to a local backups/ directory (not an
+        uploaded file, no download link is returned)."""
         try:
             import shutil, datetime
             db_path = _DB_PATH
@@ -3373,6 +3427,13 @@ class Tools:
 
 
     async def merge_pdfs(self, file_ids: str, output_filename: str = "", __user__=None, __request__=None) -> str:
+        """Concatenate multiple PDFs into one file, in the order given.
+
+        Args:
+            file_ids: Comma-separated list of PDF file IDs, e.g. "id1,id2,id3" -- pages appear
+                in the output in this exact order.
+            output_filename: Optional output filename (default "merged.pdf")
+        """
         try:
             import fitz, sqlite3 as s3, io, os
             conn2 = s3.connect(_DB_PATH)
@@ -3412,6 +3473,12 @@ class Tools:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def split_pdf(self, file_id: str, pages_per_file: int = 1, output_filename: str = "", __user__=None, __request__=None) -> str:
+        """Split a PDF into multiple smaller files, each with `pages_per_file` consecutive pages
+        (the last file may have fewer). Output files are named "part_<start>_<end>.pdf" using
+        1-based page numbers; `output_filename` is not currently used.
+
+        Complement of merge_pdfs() -- use that to combine files back together.
+        """
         try:
             import fitz, sqlite3 as s3, io, os
             conn2 = s3.connect(_DB_PATH)
@@ -3450,6 +3517,9 @@ class Tools:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
     async def tool_stats(self, __user__=None, __request__=None) -> str:
+        """Diagnostics/introspection call, not document-related: reports counts of active
+        Open WebUI tools and functions, how many files this plugin has created, and the
+        database file size. Takes no parameters."""
         try:
             import sqlite3 as s3
             conn2 = s3.connect(_DB_PATH)
@@ -3656,7 +3726,11 @@ class Tools:
 
     # --- v3.2.0: Format Conversion ---
     async def convert_format(self, file_id: str, target_format: str, __user__=None, __request__=None) -> str:
-        """Convert between Office formats (docx<->odt, xlsx<->ods, pptx<->odp)."""
+        """Convert between Office formats. Same-category conversions are clean: docx<->odt,
+        xlsx<->ods, pptx<->odp. Cross-category conversions (e.g. xlsx->pptx, docx->xlsx) are
+        technically accepted -- the source content is read then written via the target format's
+        generator -- but produce garbled/lossy output since content isn't restructured for the
+        target type. Prefer same-category conversions."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
             return json.dumps({"error": f"File not found: {file_id}"})
@@ -3693,7 +3767,10 @@ class Tools:
         return f"Template '{name}' saved."
 
     async def use_template(self, name: str, __user__=None, __request__=None, **kwargs) -> str:
-        """Generate a document from a saved template, replacing {placeholders}."""
+        """Generate a document from a template saved via save_template(), replacing
+        `{placeholder}` markers with values. Pass placeholder values as extra keyword arguments
+        matching the placeholder names, e.g. use_template(name='x', client_name='Acme')
+        replaces `{client_name}` in the template with 'Acme'."""
         templates = json.loads(self.valves.templates or "{}")
         if name not in templates:
             return f"Template '{name}' not found. Available: {', '.join(templates.keys())}"
@@ -3730,7 +3807,10 @@ class Tools:
 
     # --- v3.2.0: Mail Merge ---
     async def mail_merge(self, template_file_id: str, data_file_id: str, output_prefix: str = "merged", __user__=None, __request__=None) -> str:
-        """Generate personalized documents by merging CSV/Excel data into a DOCX template."""
+        """Generate personalized documents by merging CSV/Excel data into a DOCX template.
+        In the template, use `{{field_name}}` placeholders matching the data file's column
+        headers (for xlsx/xls, the first row is treated as headers) -- e.g. `{{first_name}}`.
+        Produces one output document per data row."""
         from docx import Document
         import io, csv
         
@@ -3813,7 +3893,9 @@ class Tools:
 
     # --- v3.2.0: Watermark ---
     async def add_watermark(self, file_id: str, text: str = "DRAFT", __user__=None, __request__=None) -> str:
-        """Add a diagonal watermark to a DOCX or PDF file."""
+        """Add a watermark to a DOCX or PDF file. PDF: a real diagonal, rotated 45-degree
+        watermark across the page. DOCX: NOT diagonal -- a large centered gray text banner
+        added to the page header instead, since python-docx has no rotated-text support."""
         import io
         
         file_bytes, filename, ftype = self._resolve_file(file_id)
@@ -3933,13 +4015,19 @@ class Tools:
 
     # --- v3.2.0: Accessibility Check ---
     async def check_accessibility(self, file_id: str) -> str:
-        """Check a document for accessibility issues."""
+        """Check a DOCX or PPTX document for accessibility issues (heading structure, image alt
+        text). Other formats (xlsx, pdf, etc.) return an explicit "not supported" result rather
+        than a false "passed, no issues" (no checks are run against them).
+        """
         import io
-        
+
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
             return json.dumps({"error": f"File not found: {file_id}"})
-        
+
+        if ftype not in ("docx", "pptx"):
+            return json.dumps({"error": f"check_accessibility only supports DOCX and PPTX. Got: {ftype}. No checks were run."})
+
         issues = []
         if ftype == "docx":
             from docx import Document
@@ -4117,7 +4205,10 @@ class Tools:
 
     # --- v3.3.0: Import from URL ---
     async def import_from_url(self, url: str, title: str = "Web Document", __user__=None, __request__=None) -> str:
-        """Fetch a web page and convert it to a Word document."""
+        """Fetch a web page and convert it to a Word document. Extraction is crude: HTML tags
+        are stripped with regex (no readability/main-content detection), so nav bars, footers,
+        and script/style text may leak into the output alongside the real article text.
+        Content is truncated to the first 50,000 characters."""
         try:
             import urllib.request as _urllib
             req = _urllib.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -4197,7 +4288,8 @@ class Tools:
 
     # --- v3.3.0: OCR ---
     async def ocr_extract(self, file_id: str, language: str = "eng", max_pages: int = 25) -> str:
-        """Extract text from images in a document using OCR. Requires pytesseract and Pillow.
+        """Extract text from images in a document using OCR. PDF only -- does not OCR images
+        embedded inside DOCX/PPTX files. Requires pytesseract and Pillow.
 
         Args:
             file_id: File ID to OCR
@@ -4289,7 +4381,10 @@ class Tools:
 
     # --- v3.4.0: AI Summarize ---
     async def ai_summarize(self, file_id: str) -> str:
-        """Extract document text for LLM summarization. The LLM will then summarize it."""
+        """Extract document text for LLM summarization -- returns raw text (first 3000 chars,
+        with a truncation note if longer), it does not generate a summary itself; the calling
+        LLM reads the returned text and writes the summary. Supports xlsx, xls, docx, pptx,
+        odt, ods, odp. Not supported: pdf."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
             return json.dumps({"error": "File not found: " + str(file_id)})
@@ -4377,7 +4472,9 @@ class Tools:
 
     # --- v3.4.0: Bulk Folder Ops ---
     async def bulk_folder_ops(self, operation: str = "list", pattern: str = "*", __user__=None, __request__=None) -> str:
-        """Apply an operation to all files in the uploads folder. Operations: list, delete_old, stats."""
+        """Apply an operation to all files in the uploads folder. Operations: list, delete_old
+        (PERMANENT, irreversible deletion of every file matching `pattern` whose modified time
+        is older than a fixed 30 days -- not configurable, no confirmation step), stats."""
         import glob as _glob, time as _time
         uploads = _UPLOAD_DIR
         if operation == "list":
@@ -4405,7 +4502,9 @@ class Tools:
 
     # --- v3.4.0: File Search ---
     async def file_search(self, query: str, file_type: str = "all") -> str:
-        """Search for text across all generated files. file_type: all, xlsx, docx, pptx, pdf."""
+        """Search for text across all generated files. file_type: all, xlsx, docx, pptx (pdf is
+        NOT supported -- pdf files are never matched despite matching a broad glob pattern, so
+        omit file_type='pdf')."""
         import glob as _glob
         results = []
         patterns = {"all": "*.*", "xlsx": "*.xlsx", "docx": "*.docx", "pptx": "*.pptx", "pdf": "*.pdf"}
@@ -4510,16 +4609,16 @@ class Tools:
 
     # --- v3.4.0: Slide Transitions ---
     async def add_slide_transitions(self, file_id: str, transition_type: str = "fade", duration: float = 0.5, __user__=None, __request__=None) -> str:
-        """Add transitions to all slides in a PPTX. Types: fade, push, wipe, split, random."""
-        import io
+        """Add transitions to all slides in a PPTX. Types: fade, push, wipe, split, random
+        (picks a different one of fade/push/wipe/split for each slide)."""
+        import io, random as _random
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype != "pptx": return json.dumps({"error": "Transitions only for PPTX"})
         from pptx import Presentation
         from pptx.util import Pt
         prs = Presentation(io.BytesIO(file_bytes))
-        transitions = {"fade": 0, "push": 1, "wipe": 2, "split": 3, "random": 4}
-        ttype = transitions.get(transition_type, 0)
+        real_types = ["fade", "push", "wipe", "split"]
         for slide in prs.slides:
             try:
                 from pptx.oxml.ns import qn
@@ -4527,13 +4626,14 @@ class Tools:
                 if trans_elem is None:
                     from lxml import etree
                     trans_elem = etree.SubElement(slide._element, qn('p:transition'))
-                if transition_type == "fade":
+                this_type = _random.choice(real_types) if transition_type == "random" else transition_type
+                if this_type == "fade":
                     etree.SubElement(trans_elem, qn('p:fade'))
-                elif transition_type == "push":
+                elif this_type == "push":
                     etree.SubElement(trans_elem, qn('p:push'))
-                elif transition_type == "wipe":
+                elif this_type == "wipe":
                     etree.SubElement(trans_elem, qn('p:wipe'))
-                elif transition_type == "split":
+                elif this_type == "split":
                     etree.SubElement(trans_elem, qn('p:split'))
                 trans_elem.set('advTm', str(int(duration * 1000)))
             except Exception:
@@ -4596,7 +4696,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     # === v3.6.0: AI-Powered Features ===
 
     async def ai_analyze(self, file_id: str) -> str:
-        """Extract document text for AI analysis. The LLM will analyze topics, sentiment, entities, and provide a summary."""
+        """Extract document text (first 5000 chars) plus an analysis prompt for the calling LLM
+        to act on -- returns raw text and instructions, not an analysis result itself. Supports
+        xlsx, xls, docx, pptx, odt, ods, odp. Not supported: pdf."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
@@ -4620,7 +4722,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return f"**Smart Fill: {filename}**\n\nSection to fill: **{section}**\nInstructions: {instruction}\n\nCurrent document content:\n```\n{content[:3000]}\n```\n\nPlease generate the content for the '{section}' section based on the instructions and existing document context."
 
     async def grammar_check(self, file_id: str) -> str:
-        """Check document for grammar and style issues. The LLM will provide corrections."""
+        """Extract document text (first 4000 chars) plus a grammar/style review prompt for the
+        calling LLM to act on -- returns raw text and instructions, not corrections itself.
+        Supports xlsx, xls, docx, pptx, odt, ods, odp. Not supported: pdf."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
@@ -4631,7 +4735,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return f"**Grammar Check: {filename}**\n\nReview this document for:\n1. Grammar errors\n2. Spelling mistakes\n3. Style inconsistencies\n4. Passive voice overuse\n5. Readability issues\n\nProvide corrections with line references:\n\n```\n{content[:4000]}\n```"
 
     async def translate_document(self, file_id: str, target_language: str, __user__=None, __request__=None) -> str:
-        """Translate a document to another language. The LLM will translate while preserving structure."""
+        """Extract document text (first 4000 chars) plus a translation prompt for the calling
+        LLM to act on -- returns raw text and instructions, not a translated document itself.
+        Supports xlsx, xls, docx, pptx, odt, ods, odp. Not supported: pdf."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
@@ -4642,7 +4748,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return f"**Translate to {target_language}: {filename}**\n\nTranslate the following document to {target_language}. Preserve all formatting markers (# for headings, | for tables, - for bullets). Keep numbers, dates, and proper names unchanged.\n\n```\n{content[:4000]}\n```"
 
     async def classify_document(self, file_id: str) -> str:
-        """Auto-classify a document by type, theme, and department."""
+        """Extract document text (first 2000 chars) plus a classification prompt for the calling
+        LLM to act on -- returns raw text and instructions, not a classification result itself.
+        Supports xlsx, xls, docx, pptx, odt, ods, odp. Not supported: pdf."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         if ftype in ("xlsx","xls"): content = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
@@ -4653,17 +4761,27 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return f"**Classify: {filename}**\n\nAnalyze this document and provide:\n1. Document type (report, proposal, invoice, contract, presentation, spreadsheet, letter, memo, manual, other)\n2. Primary theme/topic\n3. Department (finance, HR, marketing, engineering, sales, legal, operations, other)\n4. Confidentiality level (public, internal, confidential, restricted)\n5. Suggested tags (3-5 keywords)\n\n```\n{content[:2000]}\n```"
 
     async def smart_template(self, name: str, description: str, __user__=None, __request__=None) -> str:
-        """Generate a document from a smart template that adapts to the conversation context."""
+        """Generate a document from a smart template that adapts to the conversation context.
+
+        If `name` matches a template already saved via save_template(), generates and saves a
+        real document from it (same as use_template()). Otherwise, no document is created --
+        this returns guidance text describing the requested template so the calling model can
+        draft the content itself, then save it with save_template() for reuse.
+        """
         templates = json.loads(self.valves.templates or "{}")
         if name in templates:
             content = templates[name]
             return await self.generate_document(content, name, __user__=__user__, __request__=__request__)
-        return f"**Smart Template: {name}**\n\nDescription: {description}\n\nGenerate a professional document template for '{name}' with the following sections and {placeholders} for customization. Use markdown format with # headings, - bullets, and | tables."
+        return f"**Smart Template: {name}**\n\nDescription: {description}\n\nNo saved template named '{name}' yet. Draft a professional document template for '{name}' with the following sections and use `{{placeholder}}` markers for customization, then save it with save_template(name='{name}', content=...). Use markdown format with # headings, - bullets, and | tables."
 
     # === v3.6.0: Data Manipulation ===
 
     async def add_pivot_table(self, file_id: str, rows_field: str = "", cols_field: str = "", data_field: str = "", aggregate: str = "sum", __user__=None, __request__=None) -> str:
-        """Create a pivot table in Excel. aggregate: sum, count, average, min, max."""
+        """Create a pivot table in Excel (xlsx/xls only), grouping by rows_field and aggregating
+        data_field. If rows_field is omitted, this is a discovery call: instead of creating
+        anything, it returns the first 10 column headers so you can pick valid field names for
+        rows_field/data_field. aggregate: sum, count, average, min, max -- omitting data_field
+        forces count mode regardless of the aggregate value."""
         import io
         from collections import defaultdict
         file_bytes, filename, ftype = self._resolve_file(file_id)
@@ -4730,7 +4848,10 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return json.dumps({"error": self._err("could_not_save")})
 
     async def sql_to_spreadsheet(self, query: str, output_filename: str = "query_results", __user__=None, __request__=None) -> str:
-        """Execute a SQL query on the local SQLite database and export results to Excel."""
+        """Execute a SQL query on the local SQLite database and export results to Excel.
+        WARNING: `query` runs verbatim against the app's own internal database -- this executes
+        arbitrary SQL (not restricted to SELECT), including INSERT/UPDATE/DELETE/DROP against
+        live application data. Use with caution and prefer read-only SELECT queries."""
         import io
         conn2 = sqlite3.connect(_DB_PATH)
         try:
@@ -4788,7 +4909,13 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             return json.dumps({"error": str(e)})
 
     async def convert_data(self, file_id: str, target_format: str, __user__=None, __request__=None) -> str:
-        """Convert between CSV, JSON, and XML formats. target_format: csv, json, xml."""
+        """Convert between CSV, JSON, and XML formats. target_format: csv, json, xml.
+
+        Only these source->target pairs do a real conversion: csv->json, xml->json, json->csv,
+        json->xml. Any other pair (e.g. csv->xml, xml->csv) is not supported and returns an
+        explicit error -- it does NOT silently write the original unconverted content under the
+        new extension.
+        """
         import io, csv as _csv
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
@@ -4819,9 +4946,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                         writer.writeheader(); writer.writerows(data)
                         result = out.getvalue()
                     else:
-                        result = text
+                        return json.dumps({"error": "Conversion failed: JSON source is not a non-empty list of records"})
                 else:
-                    result = text
+                    return json.dumps({"error": f"convert_data to csv only supports a JSON source. Got: {ftype}. No file was written."})
                 ext = ".csv"
             except Exception as e:
                 return json.dumps({"error": f"Conversion failed: {str(e)}"})
@@ -4838,7 +4965,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                             child.text = str(v)
                     result = ET.tostring(root, encoding='unicode')
                 else:
-                    result = text
+                    return json.dumps({"error": f"convert_data to xml only supports a JSON source. Got: {ftype}. No file was written."})
                 ext = ".xml"
             except Exception as e:
                 return json.dumps({"error": f"Conversion failed: {str(e)}"})
@@ -4852,34 +4979,38 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
     # === v3.6.0: Enterprise Features ===
 
     async def compliance_check(self, file_id: str, standard: str = "gdpr") -> str:
-        """Check document for compliance issues. standards: gdpr, accessibility, branding, all."""
+        """Check a DOCX document for compliance issues (GDPR keyword scan, heading/alt-text
+        accessibility, confidentiality marking). standard: gdpr, accessibility, branding, all.
+
+        Only DOCX is supported -- other formats (xlsx, pptx, pdf, etc.) return an explicit
+        "not supported" result rather than a false "passed, no issues" (no checks are run
+        against them).
+        """
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
+        if ftype != "docx":
+            return json.dumps({"error": f"compliance_check only supports DOCX. Got: {ftype}. No checks were run."})
         issues = []
         if standard in ("gdpr", "all"):
-            text = ""
-            if ftype == "docx":
-                from docx import Document; import io
-                doc = Document(io.BytesIO(file_bytes))
-                text = " ".join(p.text for p in doc.paragraphs)
+            from docx import Document; import io
+            doc = Document(io.BytesIO(file_bytes))
+            text = " ".join(p.text for p in doc.paragraphs)
             gdpr_keywords = ["email", "phone", "address", "name", "birth", "passport", "ssn", "tax id", "iban", "credit card", "ip address", "cookie"]
             found = [k for k in gdpr_keywords if k in text.lower()]
             if found: issues.append(f"GDPR: Personal data detected: {', '.join(found)}. Ensure consent and data processing agreement.")
         if standard in ("accessibility", "all"):
-            if ftype == "docx":
-                from docx import Document; import io
-                doc = Document(io.BytesIO(file_bytes))
-                headings = [p for p in doc.paragraphs if p.style.name.startswith('Heading')]
-                if not headings: issues.append("Accessibility: No headings found. Add heading structure.")
-                images = len([r for r in doc.part.rels.values() if "image" in r.reltype])
-                if images > 0: issues.append(f"Accessibility: {images} image(s) found. Ensure alt text is provided.")
+            from docx import Document; import io
+            doc = Document(io.BytesIO(file_bytes))
+            headings = [p for p in doc.paragraphs if p.style.name.startswith('Heading')]
+            if not headings: issues.append("Accessibility: No headings found. Add heading structure.")
+            images = len([r for r in doc.part.rels.values() if "image" in r.reltype])
+            if images > 0: issues.append(f"Accessibility: {images} image(s) found. Ensure alt text is provided.")
         if standard in ("branding", "all"):
-            if ftype == "docx":
-                from docx import Document; import io
-                doc = Document(io.BytesIO(file_bytes))
-                text = " ".join(p.text for p in doc.paragraphs)
-                if "confidential" not in text.lower() and "draft" not in text.lower():
-                    issues.append("Branding: No confidentiality marking found. Consider adding DRAFT or CONFIDENTIAL watermark.")
+            from docx import Document; import io
+            doc = Document(io.BytesIO(file_bytes))
+            text = " ".join(p.text for p in doc.paragraphs)
+            if "confidential" not in text.lower() and "draft" not in text.lower():
+                issues.append("Branding: No confidentiality marking found. Consider adding DRAFT or CONFIDENTIAL watermark.")
         if not issues: return f"Compliance check passed for {filename}. No issues found."
         return f"**Compliance Report: {filename}**\n\n" + "\n".join(f"- {i}" for i in issues)
 
@@ -4953,7 +5084,16 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return json.dumps({"error": f"Unknown action: {action}"})
 
     async def document_assembly(self, template_name: str, data_file_id: str, output_prefix: str = "assembled", __user__=None, __request__=None) -> str:
-        """Assemble multiple documents from a template and data source."""
+        """Assemble multiple documents by merging each row of data_file_id into template_name
+        (a template previously saved via save_template()) -- produces one document per row.
+
+        Args:
+            template_name: Name of an existing saved template (see save_template/list_templates).
+            data_file_id: xlsx/xls get real structured parsing (first row = headers). Any other
+                format falls back to a raw CSV-decode attempt, which will fail or produce wrong
+                results for non-CSV files -- prefer xlsx/xls or genuine CSV for data_file_id.
+            output_prefix: Prefix for each generated document's filename.
+        """
         # Load template content
         templates = json.loads(self.valves.templates or "{}")
         if template_name not in templates:
@@ -5622,7 +5762,11 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         return result
 
     async def version_diff(self, file_id: str, version_label: str = "") -> str:
-        """Show differences between current file and a previous version."""
+        """Show differences between current file and a previous version saved via version_file().
+        Diff is a heuristic added/removed line COUNT (lines present in one version but not the
+        other by exact-match membership) -- not a true positional/word-level diff, and doesn't
+        show which specific lines changed. Supports xlsx, xls, docx, pptx. Not supported: pdf,
+        odt/ods/odp."""
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         base = os.path.splitext(filename)[0]
@@ -5668,7 +5812,15 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             return json.dumps({"error": f"Webhook failed: {str(e)}"})
 
     async def import_from_api(self, url: str, data_path: str = "", output_filename: str = "api_data", __user__=None, __request__=None) -> str:
-        """Import data from a REST API and export to Excel."""
+        """Import data from a REST API (GET request, expects a JSON response) and export to Excel.
+
+        Args:
+            url: API endpoint to GET.
+            data_path: Dot-notation path into the JSON response to reach the list/object to
+                export, e.g. "results.items" or "data.0.rows" (numeric segments index into
+                lists). Leave empty to use the whole response body.
+            output_filename: Output filename (".xlsx" appended if missing).
+        """
         import urllib.request as _urllib, io
         try:
             req = _urllib.Request(url, headers={"Accept": "application/json", "User-Agent": "OpenWebUI/1.0"})

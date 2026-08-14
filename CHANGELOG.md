@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.7] - 2026-08-14
+
+Full audit pass across all 70 functions for the same class of bug as 3.15.6: docstrings that
+don't accurately convey real behavior, causing a calling model to misuse a tool, avoid it, or
+trust a wrong result.
+
+### Fixed (real logic bugs)
+- **`smart_template`** crashed with `NameError` on the "no matching template" branch (referenced
+  an undefined variable). Now returns a proper guidance message instead.
+- **`compliance_check`** and **`check_accessibility`** silently returned a false-positive "passed,
+  no issues found" for unsupported formats instead of running no checks. Both now return an
+  explicit "not supported for this format" error.
+- **`convert_data`** wrote unconverted raw text into a file under the wrong extension for
+  unsupported source/target pairs (e.g. xml→csv), reporting success. Now returns an explicit
+  unsupported-pair error instead of writing garbage output.
+- **`add_slide_transitions`**'s documented `"random"` transition type had no code branch and
+  silently produced no transition. Now picks a real transition (fade/push/wipe/split) at random.
+
+### Fixed (missing docstrings — functions were invisible to the calling model)
+- Added real docstrings to `merge_sheets`, `batch_process`, `auto_backup`, `merge_pdfs`,
+  `split_pdf`, `tool_stats`.
+
+### Changed (docstring accuracy — no behavior change)
+- Corrected or clarified docstrings for 24 functions where wording didn't match real behavior:
+  `read_file` (row_start/row_end are xlsx/xls-only), `add_content`/`create_file` (pptx uses
+  `---`-separated blocks, not one slide per line), `protect_file` (honest structural edit-lock,
+  not password encryption — no msoffcrypto-tool involved), `generate_document` (documented all 9
+  auto-detected rich-content trigger patterns), `tracked_change` (DOCX-only, insert always
+  appends at the end), `convert_format` (cross-category conversions are lossy), `mail_merge`
+  (`{{field}}` placeholder syntax), `add_watermark` (DOCX branch is a centered banner, not
+  diagonal), `ocr_extract` (PDF-only), `ai_summarize`/`ai_analyze`/`grammar_check`/
+  `translate_document`/`classify_document` (these return raw text + a prompt for the calling LLM,
+  not a finished result themselves), `add_pivot_table` (no-`rows_field` discovery mode),
+  `version_diff` (heuristic line-count diff, not positional; PDF unsupported), `import_from_api`
+  (added Args section, `data_path` dot-notation syntax), `document_assembly` (added Args section;
+  non-xlsx data files fall back to a raw CSV-decode attempt), `use_template` (placeholders come
+  from `**kwargs`), `import_from_url` (crude tag-stripping extraction, 50k-char cap),
+  `bulk_folder_ops` (`delete_old` is permanent and irreversible), `file_search` (`pdf` filter
+  doesn't actually work), `sql_to_spreadsheet` (flagged that `query` runs arbitrary SQL, not just
+  SELECT, against the app's own database).
+
 ## [3.15.6] - 2026-08-14
 
 ### Changed
