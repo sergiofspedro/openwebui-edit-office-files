@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.6] - 2026-08-14
+
+### Changed
+- **`export_to_markdown`'s docstring didn't mention its PDF support at all.** For PDF it already
+  does fast, direct text extraction per page (via PyMuPDF, no OCR) with each page labeled
+  "--- Page N ---" and sparse/likely-scanned pages flagged — exactly what's needed to confirm
+  real page numbers before calling `add_comment`/`add_comments`. Because the docstring only said
+  "Export any Office file to Markdown format," a calling model had no way to discover this and
+  would reach for `ocr_extract` instead — a full, slow OCR pass over every page (156 in one real
+  case) to answer a question `export_to_markdown` could answer in a single fast call. Docstring
+  now describes the PDF behavior and explicitly recommends it over `ocr_extract` except for pages
+  actually flagged as scanned images. No logic changed.
+
 ## [3.15.5] - 2026-08-11
 
 ### Changed

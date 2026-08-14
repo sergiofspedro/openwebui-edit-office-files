@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 3.15.5
+version: 3.15.6
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -4057,7 +4057,15 @@ class Tools:
 
     # --- v3.3.0: Export to Markdown ---
     async def export_to_markdown(self, file_id: str, __user__=None, __request__=None) -> str:
-        """Export any Office file to Markdown format."""
+        """Export any Office file to Markdown format.
+
+        For PDF specifically: this extracts the real embedded text directly (fast, one call,
+        no OCR) with each page clearly labeled "--- Page N ---" -- use this first whenever you
+        need a PDF's text with real page numbers (e.g. to confirm where an excerpt sits before
+        calling add_comment/add_comments), instead of ocr_extract. Pages with little or no
+        extractable text (likely scanned images) are flagged in the output; only use ocr_extract
+        for those specific flagged pages, not the whole document.
+        """
         import io
         
         file_bytes, filename, ftype = self._resolve_file(file_id)
