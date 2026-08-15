@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 4.0.0
+version: 4.0.1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -602,11 +602,24 @@ def _read_odf(file_bytes: bytes, filename: str) -> str:
             from odf.opendocument import load
             from odf.table import Table, TableRow, TableCell
             from odf.text import P
-            
+
             doc = load(io.BytesIO(file_bytes))
             result = []
+            _MAX_REPEAT = 20  # cap on how many times one repeated cell/row is echoed
             for table in doc.getElementsByType(Table):
                 for row in table.getElementsByType(TableRow):
+                    # LibreOffice compacts runs of identical/blank cells into ONE
+                    # <table:table-cell table:number-columns-repeated="N"> element --
+                    # ignoring that attribute (the old code did) misaligns every column
+                    # after the first repeated run. Blank cells are still expanded (for
+                    # column alignment) but capped, since real files routinely encode
+                    # "rest of the row is empty" as one cell repeated thousands of times.
+                    row_repeat_raw = row.getAttribute('numberrowsrepeated')
+                    try:
+                        row_repeat = int(row_repeat_raw) if row_repeat_raw else 1
+                    except (TypeError, ValueError):
+                        row_repeat = 1
+
                     cells = []
                     for cell in row.getElementsByType(TableCell):
                         text_parts = []
@@ -615,8 +628,26 @@ def _read_odf(file_bytes: bytes, filename: str) -> str:
                                 text_parts.append(str(p))
                             except Exception:
                                 pass
-                        cells.append(" ".join(text_parts).strip())
-                    result.append(" | ".join(cells))
+                        cell_text = " ".join(text_parts).strip()
+                        repeat_raw = cell.getAttribute('numbercolumnsrepeated')
+                        try:
+                            repeat = int(repeat_raw) if repeat_raw else 1
+                        except (TypeError, ValueError):
+                            repeat = 1
+                        repeat = min(repeat, _MAX_REPEAT)
+                        cells.extend([cell_text] * repeat)
+
+                    line = " | ".join(cells)
+                    if row_repeat > 1 and not any(c.strip() for c in cells):
+                        # An entirely blank row repeated many times is filler
+                        # ("rest of the sheet is empty") -- skip it rather than
+                        # emitting hundreds/thousands of blank lines.
+                        continue
+                    emit = min(row_repeat, _MAX_REPEAT) if row_repeat > 1 else 1
+                    for _ in range(emit):
+                        result.append(line)
+                    if row_repeat > emit:
+                        result.append(f"(+{row_repeat - emit} more identical row(s))")
             return "\n".join(result) if result else "(empty spreadsheet)"
         
         elif ext == ".odt":
@@ -642,19 +673,28 @@ def _read_odf(file_bytes: bytes, filename: str) -> str:
         elif ext == ".odp":
             from odf.opendocument import load
             from odf.text import P
-            
+            from odf.draw import Page
+
             doc = load(io.BytesIO(file_bytes))
             result = []
-            slide_num = 0
-            for elem in doc.getElementsByType(P):
-                try:
-                    text = str(elem).strip()
-                    if text:
-                        result.append(f"Slide {slide_num + 1}: {text}")
-                        slide_num += 1
-                except Exception:
-                    pass
-            return "\n".join(result) if result else "(empty presentation)"
+            # Iterate real slide boundaries (draw:page, same API already used correctly
+            # in create_odf's odp-writing branch) instead of counting non-empty
+            # paragraphs -- the old code incremented slide_num per PARAGRAPH, so a
+            # single 5-bullet slide reported as "Slide 1" through "Slide 5".
+            for i, page in enumerate(doc.getElementsByType(Page), 1):
+                texts = []
+                for elem in page.getElementsByType(P):
+                    try:
+                        text = str(elem).strip()
+                        if text:
+                            texts.append(text)
+                    except Exception:
+                        pass
+                if texts:
+                    result.append(f"Slide {i}:\n" + "\n".join(texts))
+                else:
+                    result.append(f"Slide {i}: (no text)")
+            return "\n\n".join(result) if result else "(empty presentation)"
         
         return f"Unsupported ODF format: {ext}"
     except ImportError:
@@ -1953,6 +1993,54 @@ class Tools:
     # -----------------------------------------------------------------
     # MODIFY ROWS (insert/delete)
     # -----------------------------------------------------------------
+    def _shift_merged_ranges(self, ws, row_number: int, count: int, is_insert: bool):
+        """Unmerge every merged range on `ws`, and return the (min_col, min_row, max_col,
+        max_row) bounds each should be re-merged at after an insert/delete of `count` rows
+        at `row_number` -- openpyxl's insert_rows()/delete_rows() move cell VALUES only,
+        they do not touch merged-cell ranges at all, so a merge spanning the shifted rows
+        would otherwise silently end up covering the wrong cells (or straddling a
+        now-nonexistent boundary, which Excel treats as corrupt).
+
+        Must be called (and the returned ranges re-merged via `_remerge_ranges`) around the
+        insert_rows()/delete_rows() call, not instead of it.
+        """
+        old_ranges = list(ws.merged_cells.ranges)
+        new_ranges = []
+        del_start, del_end = row_number, row_number + count - 1
+
+        def _map_row(r):
+            if is_insert:
+                return r if r < row_number else r + count
+            # delete: rows before the deleted block keep their index; rows after shift up;
+            # rows inside the deleted block collapse to the block's start (callers clamp).
+            if r < del_start:
+                return r
+            if r > del_end:
+                return r - count
+            return del_start
+
+        for mcr in old_ranges:
+            min_col, min_row, max_col, max_row = mcr.bounds
+            new_min_row = _map_row(min_row)
+            new_max_row = _map_row(max_row) if is_insert else (
+                del_start - 1 if del_start <= max_row <= del_end else _map_row(max_row)
+            )
+            if new_min_row <= new_max_row:
+                new_ranges.append((min_col, new_min_row, max_col, new_max_row))
+            # else: the range was entirely consumed by the deleted rows -- dropped.
+
+        for mcr in old_ranges:
+            ws.unmerge_cells(str(mcr))
+        return new_ranges
+
+    def _remerge_ranges(self, ws, ranges):
+        from openpyxl.utils import get_column_letter
+        for min_col, min_row, max_col, max_row in ranges:
+            try:
+                ws.merge_cells(f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}")
+            except Exception:
+                pass  # skip a range that's no longer valid rather than corrupt the file
+
     async def modify_rows(
         self,
         file_id: str,
@@ -1964,7 +2052,10 @@ class Tools:
         __user__=None,
         __request__=None,
     ) -> str:
-        """Insert or delete rows in an XLSX file.
+        """Insert or delete rows in an XLSX file. Merged cell ranges are repositioned to
+        match the shift. Formulas are NOT adjusted (openpyxl has no equivalent of Excel's
+        own reference-rewriting on insert/delete) -- if the sheet contains formulas, the
+        response includes a warning so you know to check them manually.
 
         Args:
             file_id: The file ID of the XLSX file to edit
@@ -2001,13 +2092,22 @@ class Tools:
 
             action_lower = action.strip().lower()
             if action_lower == "insert":
+                new_ranges = self._shift_merged_ranges(ws, row_number, count, is_insert=True)
                 ws.insert_rows(idx=row_number, amount=count)
+                self._remerge_ranges(ws, new_ranges)
                 msg = f"Inserted {count} row(s) at row {row_number}"
             elif action_lower == "delete":
+                new_ranges = self._shift_merged_ranges(ws, row_number, count, is_insert=False)
                 ws.delete_rows(idx=row_number, amount=count)
+                self._remerge_ranges(ws, new_ranges)
                 msg = f"Deleted {count} row(s) starting at row {row_number}"
             else:
                 return json.dumps({"error": f"Unknown action '{action}'. Use 'insert' or 'delete'."})
+
+            formula_count = sum(
+                1 for row in ws.iter_rows() for cell in row
+                if getattr(cell, "data_type", None) == "f"
+            )
 
             out = io.BytesIO()
             wb.save(out)
@@ -2015,9 +2115,16 @@ class Tools:
             out.seek(0)
 
             url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
-            if url:
-                return f"[{name}]({url})\n\n{msg} in {file_type.upper()} file."
-            return json.dumps({"error": self._err("could_not_save")})
+            if not url:
+                return json.dumps({"error": self._err("could_not_save")})
+            result = f"[{name}]({url})\n\n{msg} in {file_type.upper()} file."
+            if formula_count:
+                result += (
+                    f"\nWarning: this sheet contains {formula_count} formula(s). Formulas are "
+                    f"NOT adjusted for the row shift and may now reference the wrong cells -- "
+                    f"verify them manually."
+                )
+            return result
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -2845,7 +2952,30 @@ class Tools:
         in_comparison = False; comp_headers = []; comp_rows = []
         in_progress = False; progress_data = []
         in_code_block = False; code_lines = []
-        _timeline_re = _re.compile(r'^(\d{4}|\d{1,2}[/-]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)\s*[-:]\s*(.+)$', _re.IGNORECASE)
+        # Group 2 is capped at 100 chars (real timeline/agenda entries are short; a match
+        # longer than that is far more likely an ordinary sentence that happens to start
+        # with a date, e.g. "2024: was a great year for the company because..."). A
+        # separate numeric-range check below further rejects "3-4 people attended"-style
+        # false positives from the M/D date alternative.
+        _timeline_re = _re.compile(r'^(\d{4}|\d{1,2}[/-]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)\s*[-:]\s*(.{1,100})$', _re.IGNORECASE)
+        _md_date_re = _re.compile(r'^(\d{1,2})[/-](\d{1,2})$')
+
+        def _is_plausible_timeline_entry(token, description):
+            # Bare years and month names are already unambiguous; only the M/D-style
+            # alternative needs range validation to rule out ordinary number ranges
+            # ("3-4 people", "10-15 minutes") being mistaken for a date.
+            md = _md_date_re.match(token)
+            if md:
+                a, b = int(md.group(1)), int(md.group(2))
+                if not (1 <= a <= 12 and 1 <= b <= 31):
+                    return False
+            # The 100-char cap on the regex alone doesn't catch short-but-still-a-sentence
+            # cases ("2024: was a great year for the company because it grew fast" is only
+            # 55 chars). Real timeline/agenda entries are short phrases (a handful of
+            # words), not full sentences -- cap at 8 words as the more reliable signal.
+            if len(description.split()) > 8:
+                return False
+            return True
 
         def flush_kpi():
             # KPI blocks had no flush handler at blank-line or end-of-content boundaries
@@ -2994,7 +3124,7 @@ class Tools:
             # Timeline (colon/dash format): 2024 - Event or Jan 15: Event
             if not in_timeline and not in_card and not in_kpi and not in_steps and not in_quote and not in_comparison and not in_progress:
                 tl_m = _timeline_re.match(line)
-                if tl_m:
+                if tl_m and _is_plausible_timeline_entry(tl_m.group(1), tl_m.group(2)):
                     in_timeline = True
                     timeline_data.append((tl_m.group(1), tl_m.group(2)))
                     continue
@@ -3046,20 +3176,17 @@ class Tools:
                 comp_headers = []; comp_rows = []; in_comparison = False
             
             # Progress: Label: 75%
-            if ':' in line and _re.search(r'(\d+)%', line) and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison:
+            # Anchored to the WHOLE line (not just "contains a ':' and a '%' somewhere"),
+            # and requires the percentage to be the entire remainder after the label --
+            # otherwise ordinary prose like "Note: sales grew by 12% last quarter" gets
+            # misread as a progress bar labeled "Note" at 12%.
+            _progress_m = _re.match(r'^(.+?):\s*(\d{1,3})%\s*$', line)
+            if _progress_m and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_comparison:
                 in_progress = True
-                parts = line.split(':', 1)
-                lbl = parts[0].strip()
-                pct_match = _re.search(r'(\d+)%', parts[1])
-                pct = int(pct_match.group(1)) if pct_match else 0
-                progress_data.append((lbl, pct, colors["accent"]))
+                progress_data.append((_progress_m.group(1).strip(), int(_progress_m.group(2)), colors["accent"]))
                 continue
-            elif in_progress and ':' in line and _re.search(r'(\d+)%', line):
-                parts = line.split(':', 1)
-                lbl = parts[0].strip()
-                pct_match = _re.search(r'(\d+)%', parts[1])
-                pct = int(pct_match.group(1)) if pct_match else 0
-                progress_data.append((lbl, pct, colors["accent"]))
+            elif in_progress and _progress_m:
+                progress_data.append((_progress_m.group(1).strip(), int(_progress_m.group(2)), colors["accent"]))
                 continue
             elif in_progress:
                 for lbl, pct, clr in progress_data:
@@ -3843,22 +3970,31 @@ class Tools:
             if ftype != "docx":
                 return json.dumps({"error": f"Revision management is only supported for DOCX files. {ftype.upper()} format does not support revision marks."})
 
-            from docx_revisions import RevisionDocument, RevisionParagraph
+            from docx_revisions import RevisionDocument
 
             if action == "list":
                 rdoc = RevisionDocument(io.BytesIO(data))
                 revs = []
-                for para in rdoc.paragraphs:
+                failed = 0
+                # `rdoc.paragraphs` explicitly EXCLUDES table paragraphs by design (per the
+                # docx_revisions docstring) -- tracked changes inside a table cell were
+                # silently missing from this list. `all_paragraphs` walks the body and
+                # recurses into all tables (including nested tables) and already returns
+                # ready-to-use RevisionParagraph objects, so the old code's extra
+                # RevisionParagraph.from_paragraph(para) re-wrap is also removed.
+                for rp in rdoc.all_paragraphs:
                     try:
-                        rp = RevisionParagraph.from_paragraph(para)
                         if rp.has_track_changes:
                             for ins in rp.insertions:
                                 revs.append({"type": "insertion", "author": ins.author, "text": ins.text[:100]})
                             for d in rp.deletions:
                                 revs.append({"type": "deletion", "author": d.author, "text": d.text[:100]})
                     except Exception:
-                        pass
-                return json.dumps({"revisions": revs, "count": len(revs)}, indent=2)
+                        failed += 1
+                result = {"revisions": revs, "count": len(revs)}
+                if failed:
+                    result["paragraphs_with_errors"] = failed
+                return json.dumps(result, indent=2)
     
             out_name = output_filename or filename
             rdoc = RevisionDocument(io.BytesIO(data))
