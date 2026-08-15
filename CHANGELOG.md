@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.1] - 2026-08-15
+
+Fixes the 5 items v4.0.0 left on its "known remaining issues" list.
+
+### Fixed
+- **`_read_odf` (ODS)** now reads `table:number-columns-repeated` and `table:number-rows-repeated`
+  -- a compacted ODS (LibreOffice collapses runs of identical/blank cells into one element with a
+  repeat count) previously misaligned every column after the first repeated run. Repeats are
+  capped at 20 to avoid exploding output on filler rows/columns encoding "the rest of the sheet
+  is empty"; a fully-blank repeated row is skipped entirely rather than emitted as hundreds of
+  blank lines.
+- **`_read_odf` (ODP)** now numbers slides by real slide boundaries (`draw:page`, the same API
+  already used correctly in `create_odf`'s writer) instead of incrementing once per paragraph --
+  a single 5-bullet slide no longer reports as "Slide 1" through "Slide 5".
+- **`generate_document`'s progress-bar detection** is now anchored to the whole line
+  (`^Label:\s*NN%$`) instead of "contains a `:` and a `%` anywhere" -- prose like "Note: sales
+  grew by 12% last quarter" is no longer misread as a progress bar.
+- **`generate_document`'s timeline (colon/dash) detection** now validates `M/D`-style dates as a
+  plausible month (1-12) and day (1-31), and rejects a matched description longer than 8 words --
+  real timeline/agenda entries are short phrases, not full sentences, so "2024: was a great year
+  for the company because it grew fast" is no longer misread as a timeline entry. This reduces
+  (does not claim to eliminate -- full semantic disambiguation isn't achievable with regex alone)
+  false positives from ordinary sentences that happen to start with a number or date-like token.
+- **`modify_rows`** now shifts merged-cell ranges to match an insert/delete instead of leaving
+  them pointing at the wrong cells (openpyxl's `insert_rows`/`delete_rows` move cell values only).
+  Formula references are still not rewritten (would need a real formula parser, out of scope for
+  this fix) -- the response now includes an explicit warning when the sheet contains formulas,
+  so the risk is visible instead of silent.
+- **`manage_revisions(action="list")`** now uses `docx_revisions`'s `RevisionDocument.all_paragraphs`
+  (confirmed via the installed package's source) instead of `.paragraphs`, which explicitly
+  excludes table content by design -- tracked changes inside a table cell were previously missing
+  from the listing entirely. Also removed a redundant re-wrap (`all_paragraphs` already returns
+  ready-to-use objects) and now reports a `paragraphs_with_errors` count instead of silently
+  swallowing per-paragraph failures.
+
 ## [4.0.0] - 2026-08-15
 
 Full bug-fix sweep of the whole file (~5900 lines, all 70 functions), triggered by a real
@@ -115,46 +150,9 @@ the point of the release, not an oversight.
 `_format_text` collapses newlines within a block and over-matches some short acronyms; some OOXML
 elements are appended without strict schema ordering. None of these caused a confirmed live
 failure; documented here so they're tracked rather than lost. (5 other items from this list were
-fixed in v4.0.1 -- see below.)
+fixed in v4.0.1 above.)
 
-## [4.0.1] - 2026-08-15
-
-Fixes the 5 items v4.0.0 left on its "known remaining issues" list.
-
-### Fixed
-- **`_read_odf` (ODS)** now reads `table:number-columns-repeated` and `table:number-rows-repeated`
-  -- a compacted ODS (LibreOffice collapses runs of identical/blank cells into one element with a
-  repeat count) previously misaligned every column after the first repeated run. Repeats are
-  capped at 20 to avoid exploding output on filler rows/columns encoding "the rest of the sheet
-  is empty"; a fully-blank repeated row is skipped entirely rather than emitted as hundreds of
-  blank lines.
-- **`_read_odf` (ODP)** now numbers slides by real slide boundaries (`draw:page`, the same API
-  already used correctly in `create_odf`'s writer) instead of incrementing once per paragraph --
-  a single 5-bullet slide no longer reports as "Slide 1" through "Slide 5".
-- **`generate_document`'s progress-bar detection** is now anchored to the whole line
-  (`^Label:\s*NN%$`) instead of "contains a `:` and a `%` anywhere" -- prose like "Note: sales
-  grew by 12% last quarter" is no longer misread as a progress bar.
-- **`generate_document`'s timeline (colon/dash) detection** now validates `M/D`-style dates as a
-  plausible month (1-12) and day (1-31), and rejects a matched description longer than 8 words --
-  real timeline/agenda entries are short phrases, not full sentences, so "2024: was a great year
-  for the company because it grew fast" is no longer misread as a timeline entry. This reduces
-  (does not claim to eliminate -- full semantic disambiguation isn't achievable with regex alone)
-  false positives from ordinary sentences that happen to start with a number or date-like token.
-- **`modify_rows`** now shifts merged-cell ranges to match an insert/delete instead of leaving
-  them pointing at the wrong cells (openpyxl's `insert_rows`/`delete_rows` move cell values only).
-  Formula references are still not rewritten (would need a real formula parser, out of scope for
-  this fix) -- the response now includes an explicit warning when the sheet contains formulas,
-  so the risk is visible instead of silent.
-- **`manage_revisions(action="list")`** now uses `docx_revisions`'s `RevisionDocument.all_paragraphs`
-  (confirmed via the installed package's source) instead of `.paragraphs`, which explicitly
-  excludes table content by design -- tracked changes inside a table cell were previously missing
-  from the listing entirely. Also removed a redundant re-wrap (`all_paragraphs` already returns
-  ready-to-use objects) and now reports a `paragraphs_with_errors` count instead of silently
-  swallowing per-paragraph failures.
-
-## [4.0.0] - 2026-08-15
-
-Full bug-fix sweep of the whole file (~5900 lines, all 70 functions), triggered by a real
+## [3.15.7] - 2026-08-14
 
 Full audit pass across all 70 functions for the same class of bug as 3.15.6: docstrings that
 don't accurately convey real behavior, causing a calling model to misuse a tool, avoid it, or
