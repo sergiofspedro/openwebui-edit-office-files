@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v4.0.0** | Full bug-fix sweep (~60 fixes): `page_num` is now optional for PDF comments (searches the whole document), new `find_text()`, PDF text now returned inline instead of link-only, plus fixes for false-"success" bugs, crashes, security (SSRF/`file://`/path traversal), and misc. output bugs across the file. See CHANGELOG for the full breakdown. |
 | **v3.15.7** | Full audit pass: 4 real logic bugs fixed (smart_template crash, compliance_check/check_accessibility false-positive pass, convert_data garbage output, add_slide_transitions "random" no-op), 6 missing docstrings added, 24 more docstrings corrected to match real behavior. See CHANGELOG for details. |
 | **v3.15.6** | Documented `export_to_markdown`'s existing fast, no-OCR PDF text extraction (per-page, page-labeled) so a calling model picks it over a slow full-document `ocr_extract` pass when it just needs page numbers/text. No logic changed. |
 | **v3.15.5** | Strengthened tool-selection wording so a calling model picks `add_comments` (one file for N comments) over calling `add_comment` in a loop (N separate files) — moved the guidance to the first line of both docstrings plus the plugin description. No logic changed. |

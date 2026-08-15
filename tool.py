@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 3.15.7
+version: 4.0.0
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -21,6 +21,41 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
 import base64 as _b64_mod
+
+
+def _validate_outbound_url(url: str) -> Optional[str]:
+    """Reject a URL that would let this plugin read local files or reach internal/cloud
+    network targets (SSRF). Used by every function that fetches a caller-supplied URL
+    (import_from_url, import_from_api, webhook_trigger) -- these are reachable via prompt
+    injection in an uploaded document, not just direct user requests, so `file://` and
+    loopback/link-local/private-network targets must be blocked unconditionally.
+
+    Returns an error message string if the URL should be rejected, or None if it's OK.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"URL scheme {parsed.scheme!r} is not allowed. Only http/https URLs are supported."
+    host = parsed.hostname
+    if not host:
+        return "URL has no hostname."
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        return f"Could not resolve hostname {host!r}: {e}"
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved or ip.is_multicast:
+            return f"URL resolves to a non-public address ({addr}) -- refusing to fetch internal/local network targets."
+    return None
+
 
 def _get_owui_data_dir() -> str:
     """Return the Open WebUI data directory for the current OS."""
@@ -168,6 +203,16 @@ def _read_file_bytes(file_id: str) -> Optional[bytes]:
         print(f"[office] Path traversal check failed for {path}: {exc}", file=sys.stderr)
         return None
     try:
+        # A byte-size cap before reading, not after -- without this, an oversized file
+        # (accidental or malicious upload) gets fully buffered into memory here, then
+        # copied again into io.BytesIO() by every caller, then expanded further by
+        # openpyxl/python-docx's object graph -- multiple multiples of the file's size,
+        # for a file nobody meant to process this way.
+        _MAX_FILE_BYTES = 200 * 1024 * 1024  # 200 MB
+        size = os.path.getsize(path)
+        if size > _MAX_FILE_BYTES:
+            print(f"[office] File too large ({size} bytes > {_MAX_FILE_BYTES}): {path}", file=sys.stderr)
+            return None
         with open(path, "rb") as fh:
             return fh.read()
     except Exception as exc:
@@ -943,9 +988,9 @@ class Tools:
         doc = Document(io.BytesIO(file_bytes))
         result = []
         for p in doc.paragraphs:
-            if p.style.name.startswith("Heading"):
-                level = p.style.name.replace("Heading ", "")
-                result.append(f"{'#' * int(level)} {p.text}")
+            m = re.match(r"Heading (\d+)$", p.style.name) if p.style and p.style.name else None
+            if m:
+                result.append(f"{'#' * int(m.group(1))} {p.text}")
             else:
                 result.append(p.text)
         for t in doc.tables:
@@ -977,6 +1022,13 @@ class Tools:
                 v = v.strip()
                 if v == '':
                     converted.append(None)
+                # A leading zero followed by another digit ("02134", "00123") means the
+                # value is an identifier (zip code, account number), not a number -- int()
+                # would strip the leading zero. Also reject underscores: Python 3 accepts
+                # "1_000" as a numeric literal, so int("1_000") silently returns 1000 for
+                # what was meant to be the literal text "1_000".
+                elif re.match(r'^-?0\d', v) or '_' in v:
+                    converted.append(v)
                 else:
                     try:
                         converted.append(int(v))
@@ -1124,15 +1176,21 @@ class Tools:
         sheet_name: str = "",
         row_start: int = 1,
         row_end: int = 0,
+        page_start: int = 1,
+        page_end: int = 0,
         __user__=None,
         __request__=None,
     ) -> str:
-        """Read any Office file (.xlsx, .xls, .csv, .docx, .pptx) and return its contents as structured JSON.
+        """Read any Office file (.xlsx, .xls, .csv, .docx, .pptx, .pdf) and return its
+        contents as structured JSON.
 
         Auto-detects the file type from the file ID or filename.
         For xlsx/xls/csv: returns sheets with headers and rows.
         For docx: returns paragraphs with styles and tables.
         For pptx: returns slides with shapes and text.
+        For pdf: returns real embedded text per page (fast, no OCR) -- see page_start/
+            page_end. Pages with little/no extractable text are flagged as likely scanned
+            images; use ocr_extract for those specific pages.
         Legacy .doc and .ppt formats return a helpful error message.
 
         Args:
@@ -1142,6 +1200,10 @@ class Tools:
             row_start: Starting row (1-indexed, default 1) -- xlsx/xls only, ignored for
                 csv/docx/pptx (csv is limited only by max_rows; docx/pptx have no row concept)
             row_end: Ending row (0 = use max_rows limit) -- xlsx/xls only, same as row_start
+            page_start: Starting page (1-indexed, default 1) -- pdf only, ignored otherwise
+            page_end: Ending page (0 = up to 20 pages from page_start) -- pdf only. Capped
+                at 20 pages per call regardless of the value given; call again with a higher
+                page_start to continue through a long PDF.
         """
         try:
             file_data = _read_file_bytes(file_id)
@@ -1160,7 +1222,7 @@ class Tools:
                     "SELECT filename FROM file WHERE id = ?", (file_id,)
                 ).fetchone()
                 conn.close()
-                filename = row[0] if row else file_id
+                filename = _decode_filename(row[0]) if row and row[0] else file_id
             except Exception:
                 filename = file_id
 
@@ -1173,7 +1235,11 @@ class Tools:
 
             if file_type == "xlsx":
                 import openpyxl
-                wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True)
+                # read_only=True avoids building openpyxl's full in-memory cell-object
+                # graph for a read-only operation -- _read_xlsx already does this;
+                # read_file (the more commonly reached-for function) didn't, so a large
+                # sheet cost far more memory/time here than it needed to.
+                wb = openpyxl.load_workbook(io.BytesIO(file_data), data_only=True, read_only=True)
                 result["sheets"] = []
                 sheetnames = [sn for sn in wb.sheetnames] if not sheet_name else [sn for sn in wb.sheetnames if sn == sheet_name]
                 if sheet_name and sheet_name not in wb.sheetnames:
@@ -1190,12 +1256,18 @@ class Tools:
                     r_start = max(1, row_start)
                     r_end = row_end if row_end > 0 else (ws.max_row or 0)
                     r_end = min(r_end, r_start + max_rows - 1) if max_rows else r_end
-                    for ri, row in enumerate(ws.iter_rows(min_row=r_start, max_row=r_end), r_start):
-                        rd = [_cell_value(c) for c in row]
-                        if ri == 1:
-                            sheet["headers"] = [str(v) if v is not None else "" for v in rd]
-                        else:
-                            sheet["rows"].append(rd)
+                    # Headers always come from row 1, fetched independently of the data
+                    # window -- the old code only populated "headers" when ri == 1, which
+                    # never happened once row_start > 1 (e.g. paging through a large sheet
+                    # with row_start=501), silently returning empty headers on every page
+                    # after the first. This also fixes an off-by-one: the header row no
+                    # longer eats one of max_rows's data-row slots.
+                    header_row = next(ws.iter_rows(min_row=1, max_row=1), None)
+                    if header_row:
+                        sheet["headers"] = [str(_cell_value(c)) if _cell_value(c) is not None else "" for c in header_row]
+                    data_start = max(r_start, 2)
+                    for row in ws.iter_rows(min_row=data_start, max_row=r_end):
+                        sheet["rows"].append([_cell_value(c) for c in row])
                     result["sheets"].append(sheet)
                 wb.close()
 
@@ -1271,6 +1343,7 @@ class Tools:
             elif file_type == "docx":
                 from docx import Document
                 from docx.shared import Pt
+                from docx.enum.text import WD_COLOR_INDEX
                 doc = Document(io.BytesIO(file_data))
                 paragraphs = []
                 for p in doc.paragraphs:
@@ -1314,9 +1387,44 @@ class Tools:
                             tbl = {"rows": []}
                             for row in shape.table.rows:
                                 tbl["rows"].append([cell.text for cell in row.cells])
-                            sdata["tables"] = tbl
+                            # A slide with 2+ tables previously kept only the last one --
+                            # "tables" (plural key) held a single dict, overwritten each
+                            # time. Append to a list instead.
+                            sdata.setdefault("tables", []).append(tbl)
                     slides.append(sdata)
                 result["slides"] = slides
+
+            elif file_type == "pdf":
+                import fitz
+                pdf = fitz.open(stream=file_data, filetype="pdf")
+                total_pages = pdf.page_count
+                p_start = max(1, page_start)
+                p_end = page_end if page_end > 0 else total_pages
+                p_end = min(p_end, total_pages)
+                _MAX_PDF_PAGES_PER_CALL = 20
+                if p_end - p_start + 1 > _MAX_PDF_PAGES_PER_CALL:
+                    p_end = p_start + _MAX_PDF_PAGES_PER_CALL - 1
+                pages = []
+                sparse_pages = []
+                for i in range(p_start - 1, p_end):
+                    text = pdf.load_page(i).get_text().strip()
+                    if len(text) < 20:
+                        sparse_pages.append(i + 1)
+                    pages.append({"page": i + 1, "text": text})
+                pdf.close()
+                result["total_pages"] = total_pages
+                result["pages"] = pages
+                if p_end < total_pages:
+                    result["note"] = (
+                        f"Returned pages {p_start}-{p_end} of {total_pages}. "
+                        f"Call again with page_start={p_end + 1} to continue."
+                    )
+                if sparse_pages:
+                    result["sparse_pages"] = sparse_pages
+                    result["sparse_pages_note"] = (
+                        "Little/no extractable text on these pages (likely scanned images) -- "
+                        "use ocr_extract for these specific pages."
+                    )
 
             elif file_type == "doc":
                 result["error"] = "Legacy .doc format is not supported. Please convert to .docx first."
@@ -1325,7 +1433,7 @@ class Tools:
                 result["error"] = "Legacy .ppt format is not supported. Please convert to .pptx first."
 
             else:
-                result["error"] = f"Unsupported file type. Detected: {file_type}. Supported: xlsx, xls, docx, pptx"
+                result["error"] = f"Unsupported file type. Detected: {file_type}. Supported: xlsx, xls, docx, pptx, pdf"
 
             return json.dumps(result, indent=2, default=str, ensure_ascii=False)
 
@@ -1369,7 +1477,7 @@ class Tools:
                     "SELECT filename FROM file WHERE id = ?", (file_id,)
                 ).fetchone()
                 conn.close()
-                filename = row[0] if row else file_id
+                filename = _decode_filename(row[0]) if row and row[0] else file_id
             except Exception:
                 filename = file_id
 
@@ -1473,6 +1581,7 @@ class Tools:
 
             elif file_type == "docx":
                 from docx import Document
+                from docx.shared import Pt
                 doc = Document(io.BytesIO(file_data))
                 if not out_name:
                     out_name = os.path.splitext(filename)[0] + "_edited.docx"
@@ -1487,7 +1596,7 @@ class Tools:
                     if not line:
                         continue
                     if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
-                        level = line.count('#')
+                        level = len(line) - len(line.lstrip('#'))
                         text = line.lstrip('#').strip()
                         doc.add_heading(text, level=min(level, 3))
                     elif line.startswith('- ') or line.startswith('* '):
@@ -1601,7 +1710,7 @@ class Tools:
                     "SELECT filename FROM file WHERE id = ?", (file_id,)
                 ).fetchone()
                 conn.close()
-                filename = row[0] if row else file_id
+                filename = _decode_filename(row[0]) if row and row[0] else file_id
             except Exception:
                 filename = file_id
 
@@ -1620,16 +1729,15 @@ class Tools:
                     ws = wb[sn]
                     for row in ws.iter_rows():
                         for cell in row:
-                            if cell.value is None:
-                                continue
+                            # Only string cells are text-replaced. A non-string cell (number,
+                            # date, bool) previously matched by substring-testing its str()
+                            # form but then OVERWRITING THE WHOLE CELL with replace_with --
+                            # e.g. replace_text(id, "0", "O") turned every number/date cell
+                            # containing a "0" into the literal string "O". Skipping non-string
+                            # cells entirely avoids destroying numeric/date data.
                             if isinstance(cell.value, str) and find_text in cell.value:
                                 cell.value = cell.value.replace(find_text, replace_with)
                                 count += 1
-                            elif not isinstance(cell.value, str):
-                                sval = str(cell.value)
-                                if find_text in sval:
-                                    cell.value = replace_with
-                                    count += 1
 
                 wb.save(out)
                 wb.close()
@@ -1647,16 +1755,15 @@ class Tools:
                     ws = wb[sn]
                     for row in ws.iter_rows():
                         for cell in row:
-                            if cell.value is None:
-                                continue
+                            # Only string cells are text-replaced. A non-string cell (number,
+                            # date, bool) previously matched by substring-testing its str()
+                            # form but then OVERWRITING THE WHOLE CELL with replace_with --
+                            # e.g. replace_text(id, "0", "O") turned every number/date cell
+                            # containing a "0" into the literal string "O". Skipping non-string
+                            # cells entirely avoids destroying numeric/date data.
                             if isinstance(cell.value, str) and find_text in cell.value:
                                 cell.value = cell.value.replace(find_text, replace_with)
                                 count += 1
-                            elif not isinstance(cell.value, str):
-                                sval = str(cell.value)
-                                if find_text in sval:
-                                    cell.value = replace_with
-                                    count += 1
 
                 wb.save(out)
                 wb.close()
@@ -1667,33 +1774,39 @@ class Tools:
                 if not out_name:
                     out_name = os.path.splitext(filename)[0] + "_edited.docx"
 
-                for para in doc.paragraphs:
-                    if find_text in para.text:
-                        if para.runs:
-                            # Preserve formatting: replace within each run individually
-                            for run in para.runs:
-                                if find_text in run.text:
-                                    run.text = run.text.replace(find_text, replace_with)
-                            count += 1
-                        else:
-                            para.text = para.text.replace(find_text, replace_with)
-                            count += 1
+                cross_run_misses = 0
 
-                # Also replace in tables
+                def _replace_in_paragraph(para):
+                    nonlocal count, cross_run_misses
+                    if find_text not in para.text:
+                        return
+                    if not para.runs:
+                        para.text = para.text.replace(find_text, replace_with)
+                        count += 1
+                        return
+                    # Only count a real replacement -- a paragraph can contain find_text
+                    # while NO SINGLE RUN does (Word splits phrases across runs constantly:
+                    # spell-check marks, bold spans, language tags). The old code counted
+                    # the paragraph as replaced regardless, reporting success on a file that
+                    # was never actually changed.
+                    changed = False
+                    for run in para.runs:
+                        if find_text in run.text:
+                            run.text = run.text.replace(find_text, replace_with)
+                            changed = True
+                    if changed:
+                        count += 1
+                    else:
+                        cross_run_misses += 1
+
+                for para in doc.paragraphs:
+                    _replace_in_paragraph(para)
+
                 for table in doc.tables:
                     for row in table.rows:
                         for cell in row.cells:
-                            if find_text in cell.text:
-                                for para in cell.paragraphs:
-                                    if find_text in para.text:
-                                        if para.runs:
-                                            for run in para.runs:
-                                                if find_text in run.text:
-                                                    run.text = run.text.replace(find_text, replace_with)
-                                            count += 1
-                                        else:
-                                            para.text = para.text.replace(find_text, replace_with)
-                                            count += 1
+                            for para in cell.paragraphs:
+                                _replace_in_paragraph(para)
 
                 doc.save(out)
 
@@ -1703,18 +1816,26 @@ class Tools:
                 if not out_name:
                     out_name = os.path.splitext(filename)[0] + "_edited.pptx"
 
+                cross_run_misses = 0
                 for slide in prs.slides:
                     for shape in slide.shapes:
                         if hasattr(shape, "text_frame"):
                             for para in shape.text_frame.paragraphs:
-                                if find_text in para.text:
-                                    if para.runs:
-                                        for run in para.runs:
-                                            if find_text in run.text:
-                                                run.text = run.text.replace(find_text, replace_with)
-                                    else:
-                                        para.text = para.text.replace(find_text, replace_with)
+                                if find_text not in para.text:
+                                    continue
+                                if not para.runs:
+                                    para.text = para.text.replace(find_text, replace_with)
                                     count += 1
+                                    continue
+                                changed = False
+                                for run in para.runs:
+                                    if find_text in run.text:
+                                        run.text = run.text.replace(find_text, replace_with)
+                                        changed = True
+                                if changed:
+                                    count += 1
+                                else:
+                                    cross_run_misses += 1
 
                 prs.save(out)
 
@@ -1723,9 +1844,14 @@ class Tools:
 
             out.seek(0)
             url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
-            if url:
-                return f"[{name}]({url})\n\nReplaced '{find_text}' with '{replace_with}' in {count} place(s), preserving all formatting."
-            return json.dumps({"error": self._err("could_not_save")})
+            if not url:
+                return json.dumps({"error": self._err("could_not_save")})
+            result = f"[{name}]({url})\n\nReplaced '{find_text}' with '{replace_with}' in {count} place(s), preserving all formatting."
+            if count == 0:
+                result = f"No replacements made -- '{find_text}' was not found (or only spans a formatting boundary Word split into separate runs). No file was changed: [{name}]({url}) is identical to the original."
+            elif locals().get("cross_run_misses"):
+                result += f"\n{cross_run_misses} additional occurrence(s) were seen but NOT replaced because '{find_text}' spans a formatting boundary (split across separate runs)."
+            return result
 
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
@@ -1762,7 +1888,7 @@ class Tools:
                     "SELECT filename FROM file WHERE id = ?", (file_id,)
                 ).fetchone()
                 conn2.close()
-                filename = row2[0] if row2 else file_id
+                filename = _decode_filename(row2[0]) if row2 and row2[0] else file_id
             except Exception:
                 filename = file_id
 
@@ -1784,13 +1910,24 @@ class Tools:
             out_name = output_filename or os.path.splitext(filename)[0] + "_updated.xlsx"
             wb = openpyxl.load_workbook(io.BytesIO(file_data))
             count = 0
-            for upd in updates:
+            skipped = []
+            for i, upd in enumerate(updates):
                 cell_ref = upd.get("cell", "")
-                value = upd.get("value", "")
+                if "value" not in upd:
+                    skipped.append(f"entry {i}: missing 'value' key")
+                    continue
+                value = upd.get("value")
                 sname = upd.get("sheet", "")
+                if sname and sname not in wb.sheetnames:
+                    skipped.append(f"entry {i}: sheet {sname!r} not found (available: {wb.sheetnames})")
+                    continue
                 ws = wb[sname] if sname else wb.active
-                m = _re_cell.match(r"([A-Za-z]+)(\d+)", cell_ref)
+                # fullmatch, not match: "A1:B10" would previously match at the start
+                # (A1) and silently write one cell while the caller believed a range
+                # was updated.
+                m = _re_cell.fullmatch(r"([A-Za-z]+)(\d+)", cell_ref)
                 if not m:
+                    skipped.append(f"entry {i}: invalid cell reference {cell_ref!r}")
                     continue
                 col_str, row_str = m.group(1), m.group(2)
                 col_idx = column_index_from_string(col_str.upper())
@@ -1804,9 +1941,12 @@ class Tools:
             out.seek(0)
 
             url, name = await self._save_and_link(out.read(), out_name, __request__, __user__=__user__)
-            if url:
-                return f"[{name}]({url})\n\nUpdated {count} cell(s) in {file_type.upper()} file."
-            return json.dumps({"error": self._err("could_not_save")})
+            if not url:
+                return json.dumps({"error": self._err("could_not_save")})
+            result = f"[{name}]({url})\n\nUpdated {count} cell(s) in {file_type.upper()} file."
+            if skipped:
+                result += f"\n{len(skipped)} entries skipped: " + "; ".join(skipped)
+            return result
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
 
@@ -1845,7 +1985,7 @@ class Tools:
                     "SELECT filename FROM file WHERE id = ?", (file_id,)
                 ).fetchone()
                 conn2.close()
-                filename = row2[0] if row2 else file_id
+                filename = _decode_filename(row2[0]) if row2 and row2[0] else file_id
             except Exception:
                 filename = file_id
 
@@ -1916,7 +2056,7 @@ class Tools:
                     "SELECT filename FROM file WHERE id = ?", (file_id,)
                 ).fetchone()
                 conn2.close()
-                filename = row2[0] if row2 else file_id
+                filename = _decode_filename(row2[0]) if row2 and row2[0] else file_id
             except Exception:
                 filename = file_id
 
@@ -1936,9 +2076,13 @@ class Tools:
                 # Set workbook protection
                 wb.security = WorkbookProtection(workbookPassword=password, lockStructure=True)
 
-                # Protect all sheets
+                # Protect all sheets. set_password() only assigns the password -- it does
+                # NOT flip SheetProtection.sheet to True (its default is False), so without
+                # this the saved file has a <sheetProtection> element that's actually
+                # disabled and every sheet opens fully editable.
                 for ws in wb.worksheets:
                     ws.protection.set_password(password)
+                    ws.protection.sheet = True
 
                 out = io.BytesIO()
                 wb.save(out)
@@ -2348,6 +2492,9 @@ class Tools:
                     run2.font.size = Pt(9)
         
         def add_progress_bar(doc, label, percentage, color_hex):
+            # Clamp: a value outside 0-100 (e.g. "Growth: 150%") would otherwise produce a
+            # negative table-cell width, which Word treats as corrupt content.
+            percentage = max(0, min(100, percentage))
             p = doc.add_paragraph()
             p.paragraph_format.space_before = Pt(4)
             p.paragraph_format.space_after = Pt(2)
@@ -2699,6 +2846,52 @@ class Tools:
         in_progress = False; progress_data = []
         in_code_block = False; code_lines = []
         _timeline_re = _re.compile(r'^(\d{4}|\d{1,2}[/-]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)\s*[-:]\s*(.+)$', _re.IGNORECASE)
+
+        def flush_kpi():
+            # KPI blocks had no flush handler at blank-line or end-of-content boundaries
+            # (unlike card/steps/timeline/comparison/progress, which all do) -- a document
+            # ending in a KPI block, or with a blank line after one, silently lost it.
+            nonlocal kpi_data, in_kpi
+            if not kpi_data:
+                in_kpi = False
+                return
+            kpi_table = doc.add_table(rows=1, cols=len(kpi_data))
+            kpi_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            for j, kpi in enumerate(kpi_data):
+                val = kpi[0] if len(kpi) > 0 else ""
+                lbl = kpi[1] if len(kpi) > 1 else ""
+                icon_match = _re.match(r'^([\U0001F300-\U0001F9FF]\s*)', val)
+                icon = icon_match.group(1).strip() if icon_match else ""
+                if icon: val = val[len(icon):].strip()
+                cell = kpi_table.rows[0].cells[j]
+                cell.width = Inches(2.8)
+                tcC = cell._tc; tcPrC = tcC.get_or_add_tcPr()
+                shdC = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
+                tcPrC.append(shdC)
+                pC = cell.paragraphs[0]; pC.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pC.paragraph_format.space_before = Pt(12)
+                runC = pC.add_run(f"{icon} {val}" if icon else val)
+                runC.font.size = Pt(24); runC.font.bold = True
+                runC.font.color.rgb = hex_to_rgb(colors["primary"])
+                runC.font.name = font_pair["heading"]
+                pC2 = cell.add_paragraph(); pC2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pC2.paragraph_format.space_after = Pt(12)
+                runC2 = pC2.add_run(_format_text(lbl, mode=fmt_mode))
+                runC2.font.size = Pt(9); runC2.font.color.rgb = hex_to_rgb(colors["text"])
+                runC2.font.name = font_pair["body"]
+            doc.add_paragraph()
+            kpi_data = []; in_kpi = False
+
+        def flush_quote():
+            # Same gap as KPI -- a document ending in (or with a blank line after) a pull
+            # quote lost it entirely, since only the "next line starts the attribution"
+            # branch ever rendered it.
+            nonlocal quote_text, quote_author, in_quote
+            if not quote_text:
+                in_quote = False
+                return
+            add_pull_quote(doc, quote_text, quote_author)
+            in_quote = False; quote_text = ""; quote_author = ""
         
         for line in lines:
             line = line.strip()
@@ -2726,8 +2919,12 @@ class Tools:
                     for lbl, pct, clr in progress_data:
                         add_progress_bar(doc, lbl, pct, clr)
                     progress_data = []; in_progress = False
+                if in_kpi:
+                    flush_kpi()
+                if in_quote:
+                    flush_quote()
                 continue
-            
+
             # Code block: ``` ... ```
             if line.startswith('```'):
                 if not in_code_block:
@@ -2778,34 +2975,7 @@ class Tools:
                 kpi_data.append(parts)
                 continue
             elif in_kpi:
-                # Render KPI cards
-                kpi_table = doc.add_table(rows=1, cols=len(kpi_data))
-                kpi_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-                for j, kpi in enumerate(kpi_data):
-                    if j < len(kpi_data):
-                        val = kpi[0] if len(kpi) > 0 else ""
-                        lbl = kpi[1] if len(kpi) > 1 else ""
-                        icon_match = _re.match(r'^([\U0001F300-\U0001F9FF]\s*)', val)
-                        icon = icon_match.group(1).strip() if icon_match else ""
-                        if icon: val = val[len(icon):].strip()
-                        cell = kpi_table.rows[0].cells[j]
-                        cell.width = Inches(2.8)
-                        tcC = cell._tc; tcPrC = tcC.get_or_add_tcPr()
-                        shdC = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{colors["light"]}" w:val="clear"/>')
-                        tcPrC.append(shdC)
-                        pC = cell.paragraphs[0]; pC.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        pC.paragraph_format.space_before = Pt(12)
-                        runC = pC.add_run(f"{icon} {val}" if icon else val)
-                        runC.font.size = Pt(24); runC.font.bold = True
-                        runC.font.color.rgb = hex_to_rgb(colors["primary"])
-                        runC.font.name = font_pair["heading"]
-                        pC2 = cell.add_paragraph(); pC2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        pC2.paragraph_format.space_after = Pt(12)
-                        runC2 = pC2.add_run(_format_text(lbl, mode=fmt_mode))
-                        runC2.font.size = Pt(9); runC2.font.color.rgb = hex_to_rgb(colors["text"])
-                        runC2.font.name = font_pair["body"]
-                doc.add_paragraph()
-                kpi_data = []; in_kpi = False
+                flush_kpi()
             
             # Timeline: 📅 2024 | Event description (pipe format)
             if '|' in line and _re.match(r'^[\U0001F300-\U0001F9FF\s]*\d{4}', line) and not in_card and not in_kpi and not in_steps and not in_quote and not in_comparison and not in_progress:
@@ -2852,14 +3022,13 @@ class Tools:
                 continue
             elif in_quote and (line.startswith('\u2014') or (line.strip() and not line.startswith('"') and not line.startswith('#') and not line.startswith('-') and not line.startswith('*') and not line.startswith('>') and not line.startswith('|') and not line.startswith('@') and not line.startswith('```'))):
                 quote_author = line.lstrip('\u2014 ').strip()
-                add_pull_quote(doc, quote_text, quote_author)
-                in_quote = False; quote_text = ""; quote_author = ""
+                flush_quote()
                 continue
             
             # Comparison table: | Feature | A | B |
             if line.startswith('|') and line.endswith('|') and not in_card and not in_kpi and not in_timeline and not in_steps and not in_quote and not in_progress:
                 cells = [c.strip() for c in line.split('|')[1:-1]]
-                if all(c.startswith('---') for c in cells):
+                if all(_re.fullmatch(r':?-{2,}:?', c) for c in cells):
                     continue
                 if not in_comparison:
                     in_comparison = True
@@ -2869,7 +3038,7 @@ class Tools:
                 continue
             elif in_comparison and line.startswith('|') and line.endswith('|'):
                 cells = [c.strip() for c in line.split('|')[1:-1]]
-                if not all(c.startswith('---') for c in cells):
+                if not all(_re.fullmatch(r':?-{2,}:?', c) for c in cells):
                     comp_rows.append(cells)
                 continue
             elif in_comparison:
@@ -2913,7 +3082,7 @@ class Tools:
             
             # Headings with emoji
             if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
-                level = line.count('#')
+                level = len(line) - len(line.lstrip('#'))
                 text = line.lstrip('#').strip()
                 heading_level = min(level, 3)
                 _add_rich_paragraph(doc, text, style=f'Heading {heading_level}', font_name=font_pair["heading"], font_size=sizes.get(heading_level, 14), color=colors["primary"])
@@ -2957,6 +3126,10 @@ class Tools:
         if in_progress:
             for lbl, pct, clr in progress_data:
                 add_progress_bar(doc, lbl, pct, clr)
+        if in_kpi:
+            flush_kpi()
+        if in_quote:
+            flush_quote()
         if in_code_block:
             for code_line in code_lines:
                 p = doc.add_paragraph()
@@ -3255,7 +3428,7 @@ class Tools:
                     row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
                 if not row:
                     return json.dumps({"error": self._err("file_not_found")})
-                filename = row[0]
+                filename = _decode_filename(row[0]) if row[0] else row[0]
                 meta = json.loads(row[1]) if row[1] else {}
                 data = _read_file_bytes(meta.get("path", file_id))
                 if not data:
@@ -3298,7 +3471,17 @@ class Tools:
                     rp = RevisionParagraph.from_paragraph(p)
                     rp.add_tracked_deletion(0, len(p.text), author=author)
                     results.append(f"Marked para {idx} for deletion")
-    
+                else:
+                    return json.dumps({"error": f"Paragraph index {idx} out of range (document has {len(doc.paragraphs)} paragraphs)."})
+            else:
+                return json.dumps({"error": f"Unknown change_type: {change_type!r}. Use: replace, insert, delete."})
+
+            if not results:
+                # No branch above actually changed anything (e.g. "replace" whose old_text
+                # wasn't found in any paragraph) -- saving here would produce an unchanged
+                # file while still reporting success.
+                return json.dumps({"error": "No tracked changes were applied -- the target text/paragraph was not found. No file was changed."})
+
             out = io.BytesIO()
             doc.save(out)
             out.seek(0)
@@ -3334,7 +3517,7 @@ class Tools:
                         row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
                     if not row:
                         continue
-                    filename = row[0]
+                    filename = _decode_filename(row[0]) if row[0] else row[0]
                     meta = json.loads(row[1]) if row[1] else {}
                     data = _read_file_bytes(meta.get("path", fid))
                     if not data:
@@ -3344,6 +3527,17 @@ class Tools:
                     for sn in wb_src.sheetnames:
                         ws_src = wb_src[sn]
                         sheet_name = (base_name + "_" + sn)[:31]
+                        if sheet_name in wb_out.sheetnames:
+                            # Two source files truncating to the same 15-char base_name
+                            # (e.g. "Quarterly_Report_2023.xlsx" / "...2024.xlsx" both
+                            # become "Quarterly_Repor") would otherwise collide -- Excel
+                            # sheet names must be unique, so disambiguate with a suffix
+                            # instead of letting a later sheet silently overwrite an
+                            # earlier one under the same name.
+                            suffix = 2
+                            while f"{sheet_name[:29]}_{suffix}" in wb_out.sheetnames:
+                                suffix += 1
+                            sheet_name = f"{sheet_name[:29]}_{suffix}"
                         ws_out = wb_out.create_sheet(title=sheet_name)
                         for ri, row_data in enumerate(ws_src.iter_rows(), 1):
                             for ci, cell in enumerate(row_data, 1):
@@ -3387,19 +3581,36 @@ class Tools:
         try:
             ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
             results = []
+            failed = 0
             for fid in ids:
                 if operation == "replace":
                     parts = params.split("|||", 1)
-                    if len(parts) == 2:
-                        await self.replace_text(fid, parts[0], parts[1], "", __user__, __request__)
+                    if len(parts) != 2:
+                        results.append(f"  {fid}: FAILED -- params must be 'old_text|||new_text'")
+                        failed += 1
+                        continue
+                    # Capture and inspect each call's actual return value -- the old code
+                    # discarded it and unconditionally printed "replaced"/"rows added" even
+                    # when the underlying call errored or made zero changes.
+                    r = await self.replace_text(fid, parts[0], parts[1], "", __user__, __request__)
+                    if r.strip().startswith("{") or r.startswith("No replacements made"):
+                        results.append(f"  {fid}: FAILED -- {r[:150]}")
+                        failed += 1
+                    else:
                         results.append(f"  {fid}: replaced")
                 elif operation == "add_rows":
-                    await self.add_content(fid, params, "", __user__, __request__)
-                    results.append(f"  {fid}: rows added")
+                    r = await self.add_content(fid, params, "", __user__, __request__)
+                    if r.strip().startswith("{"):
+                        results.append(f"  {fid}: FAILED -- {r[:150]}")
+                        failed += 1
+                    else:
+                        results.append(f"  {fid}: rows added")
                 else:
                     results.append(f"  {fid}: unsupported operation '{operation}'")
+                    failed += 1
             if results:
-                return "Batch processed " + str(len(ids)) + " files:\n" + "\n".join(results)
+                summary = f"Batch processed {len(ids)} files ({len(ids) - failed} succeeded, {failed} failed):\n" + "\n".join(results)
+                return summary
             return json.dumps({"error": f"No files processed. Unsupported operation: {operation}"})
         except Exception as e:
             return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
@@ -3411,14 +3622,27 @@ class Tools:
         writes a new "webui_backup_<timestamp>.db" file to a local backups/ directory (not an
         uploaded file, no download link is returned)."""
         try:
-            import shutil, datetime
+            import datetime
             db_path = _DB_PATH
             backup_dir = os.path.join(_get_owui_data_dir(), "backups")
             os.makedirs(backup_dir, exist_ok=True)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"webui_backup_{timestamp}.db"
             backup_path = os.path.join(backup_dir, backup_name)
-            shutil.copy2(db_path, backup_path)
+            # sqlite3's own Connection.backup() (not shutil.copy2) -- a plain file copy of
+            # a LIVE database can land mid-write, copying a page that's only half-flushed
+            # to disk, which produces a torn/unrecoverable backup file. backup() uses
+            # SQLite's online backup API, which is safe to run against a database another
+            # process is actively writing to.
+            src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                dst = sqlite3.connect(backup_path)
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
             size_kb = os.path.getsize(backup_path) / 1024
             return json.dumps({"success": True, "backup_path": backup_path, "size_kb": round(size_kb,1), "message": f"Backup: {backup_name} ({size_kb:.1f} KB)"})
         except Exception as e:
@@ -3606,7 +3830,7 @@ class Tools:
                     row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
                 if not row:
                     return json.dumps({"error": self._err("file_not_found")})
-                filename = row[0]
+                filename = _decode_filename(row[0]) if row[0] else row[0]
                 meta = json.loads(row[1]) if row[1] else {}
                 data = _read_file_bytes(meta.get("path", file_id))
                 if not data:
@@ -3669,13 +3893,14 @@ class Tools:
             format: 'odt', 'ods', or 'odp'
             raw_text: If True, skip text formatting
         """
-        from odf.opendocument import OpenDocumentText, OpenDocumentSpreadsheet, OpenDocumentPresentation
-        from odf.text import P, H
-        from odf.table import Table, TableRow, TableCell
-        import io
         fmt_mode = "preserve" if raw_text else "format"
-        
+
         try:
+            from odf.opendocument import OpenDocumentText, OpenDocumentSpreadsheet, OpenDocumentPresentation
+            from odf.text import P, H
+            from odf.table import Table, TableRow, TableCell
+            import io
+
             if format == "ods":
                 doc = OpenDocumentSpreadsheet()
                 lines = content.split('\n')
@@ -3692,14 +3917,49 @@ class Tools:
                     table.addElement(row)
                 doc.spreadsheet.addElement(table)
             elif format == "odp":
+                # ODP requires real slides: a draw:page per slide (with a master page and a
+                # text frame) -- adding text:h/text:p directly to office:presentation (the old
+                # code) is not valid ODP structure and produces an empty/broken presentation
+                # when opened in LibreOffice/PowerPoint, even though it "saves" without error.
+                from odf.style import Style, MasterPage, PageLayout, PageLayoutProperties
+                from odf.draw import Page, Frame, TextBox
+
                 doc = OpenDocumentPresentation()
+                layout = PageLayout(name="PL1")
+                layout.addElement(PageLayoutProperties(pagewidth="28cm", pageheight="15.75cm", printorientation="landscape"))
+                doc.automaticstyles.addElement(layout)
+                master = MasterPage(name="Default", pagelayoutname=layout)
+                doc.masterstyles.addElement(master)
+
+                frame_style = Style(name="FrameStyle", family="presentation")
+                doc.automaticstyles.addElement(frame_style)
+
+                slides = []
+                current = []
                 for line in content.split('\n'):
                     line = line.strip()
-                    if not line: continue
-                    if line.startswith('# '):
-                        doc.presentation.addElement(H(outlinelevel=1, text=line[2:]))
+                    if not line:
+                        continue
+                    if line.startswith('# ') and current:
+                        slides.append(current)
+                        current = [line]
                     else:
-                        doc.presentation.addElement(P(text=_format_text(line, mode=fmt_mode)))
+                        current.append(line)
+                if current:
+                    slides.append(current)
+                if not slides:
+                    slides = [["(empty slide)"]]
+
+                for slide_lines in slides:
+                    page = Page(masterpagename=master)
+                    doc.presentation.addElement(page)
+                    frame = Frame(stylename=frame_style, width="25cm", height="13.75cm", x="1.5cm", y="1cm")
+                    page.addElement(frame)
+                    textbox = TextBox()
+                    frame.addElement(textbox)
+                    for line in slide_lines:
+                        text = line[2:].strip() if line.startswith('# ') else line
+                        textbox.addElement(P(text=_format_text(text, mode=fmt_mode)))
             else:
                 doc = OpenDocumentText()
                 for line in content.split('\n'):
@@ -3829,31 +4089,71 @@ class Tools:
             ws = wb.active
             headers = [str(c.value or '') for c in ws[1]]
             for row in ws.iter_rows(min_row=2, values_only=True):
-                rows.append(dict(zip(headers, [str(v or '') for v in row])))
+                # `str(v or '')` treats 0, 0.0, and False as falsy -> silently blanked to
+                # "" instead of "0"/"0.0"/"False". Only a real None should become "".
+                rows.append(dict(zip(headers, ['' if v is None else str(v) for v in row])))
         else:
-            reader = csv.DictReader(io.StringIO(d_bytes.decode('utf-8')))
+            reader = csv.DictReader(io.StringIO(d_bytes.decode('utf-8-sig')))
             rows = list(reader)
-        
+
         if not rows:
             return json.dumps({"error": "No data rows found"})
-        
+
+        _MAX_ROWS = 200
+        mail_merge_truncated_note = ""
+        if len(rows) > _MAX_ROWS:
+            mail_merge_truncated_note = f"\n\nData had {len(rows)} rows; only the first {_MAX_ROWS} were merged."
+            rows = rows[:_MAX_ROWS]
+
+        def merge_paragraph(para, row):
+            for key, value in row.items():
+                token = f"{{{{{key}}}}}"
+                if token not in para.text:
+                    continue
+                # Prefer a per-run replace (preserves formatting exactly) when the token
+                # fits entirely inside one run. Word often splits a typed "{{field}}"
+                # across separate runs (spell-check state, rsid boundaries) -- when no
+                # single run contains the whole token, the old code silently left the
+                # literal "{{field}}" in the output. Fall back to a paragraph-level
+                # rebuild in that case so the substitution actually happens.
+                if any(token in run.text for run in para.runs):
+                    for run in para.runs:
+                        run.text = run.text.replace(token, value)
+                elif para.runs:
+                    merged = "".join(r.text for r in para.runs).replace(token, value)
+                    para.runs[0].text = merged
+                    for r in para.runs[1:]:
+                        r.text = ""
+
         results = []
+        errors = []
         for i, row in enumerate(rows):
-            doc = Document(io.BytesIO(t_bytes))
-            for para in doc.paragraphs:
-                for key, value in row.items():
-                    if f"{{{{{key}}}}}" in para.text:
-                        for run in para.runs:
-                            run.text = run.text.replace(f"{{{{{key}}}}}", value)
-            buf = io.BytesIO()
-            doc.save(buf)
-            buf.seek(0)
-            fname = f"{output_prefix}_{i+1}.docx"
-            url, saved = await self._save_and_link(buf.getvalue(), fname, __request__, __user__=__user__)
-            if url:
-                results.append(f"[{saved}]({url})")
-        
-        return f"Merged {len(results)} documents:\n" + "\n".join(results)
+            try:
+                doc = Document(io.BytesIO(t_bytes))
+                for para in doc.paragraphs:
+                    merge_paragraph(para, row)
+                for table in doc.tables:
+                    for trow in table.rows:
+                        for cell in trow.cells:
+                            for para in cell.paragraphs:
+                                merge_paragraph(para, row)
+                buf = io.BytesIO()
+                doc.save(buf)
+                buf.seek(0)
+                fname = f"{output_prefix}_{i+1}.docx"
+                url, saved = await self._save_and_link(buf.getvalue(), fname, __request__, __user__=__user__)
+                if url:
+                    results.append(f"[{saved}]({url})")
+                else:
+                    errors.append(f"row {i+1}: could not save")
+            except Exception as e:
+                errors.append(f"row {i+1}: {str(e)}")
+
+        result = f"Merged {len(results)} documents:\n" + "\n".join(results)
+        if errors:
+            result += f"\n{len(errors)} row(s) failed: " + "; ".join(errors)
+        result += mail_merge_truncated_note
+        return result
 
     # --- v3.2.0: Chart Generation ---
     async def add_chart(self, file_id: str, chart_type: str = "bar", title: str = "Chart", __user__=None, __request__=None) -> str:
@@ -3866,30 +4166,44 @@ class Tools:
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
             return json.dumps({"error": f"File not found: {file_id}"})
-        
-        wb = load_workbook(io.BytesIO(file_bytes))
-        ws = wb.active
-        
-        chart_types = {"bar": BarChart, "line": LineChart, "pie": PieChart, "scatter": ScatterChart}
-        chart_class = chart_types.get(chart_type, BarChart)
-        chart = chart_class()
-        chart.title = title
-        chart.style = 10
-        
-        if ws.max_row > 1:
-            data = Reference(ws, min_col=1, min_row=1, max_row=ws.max_row, max_col=ws.max_column)
-            chart.add_data(data, titles_from_data=True)
-        
-        chart_col = get_column_letter(ws.max_column + 2)
-        ws.add_chart(chart, f"{chart_col}1")
-        
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
-        if url:
-            return f"Chart added: [{fname}]({url})"
-        return json.dumps({"error": self._err("could_not_save")})
+        if ftype not in ("xlsx", "xls"):
+            return json.dumps({"error": f"Charts only supported for Excel files. Got: {ftype}"})
+
+        try:
+            wb = load_workbook(io.BytesIO(file_bytes))
+            ws = wb.active
+            if ws.max_column < 2:
+                return json.dumps({"error": "Sheet needs at least 2 columns (labels + data) to chart."})
+
+            chart_types = {"bar": BarChart, "line": LineChart, "pie": PieChart, "scatter": ScatterChart}
+            chart_class = chart_types.get(chart_type, BarChart)
+            chart = chart_class()
+            chart.title = title
+            chart.style = 10
+
+            if ws.max_row > 1:
+                # Column 1 = category labels (e.g. month names), columns 2+ = actual data
+                # series. Including column 1 in the data range (the old code) makes openpyxl
+                # plot the labels themselves as a bogus numeric-looking series, and never
+                # calls set_categories, so the category axis shows 1,2,3... instead of the
+                # real labels.
+                data = Reference(ws, min_col=2, min_row=1, max_row=ws.max_row, max_col=ws.max_column)
+                cats = Reference(ws, min_col=1, min_row=2, max_row=ws.max_row)
+                chart.add_data(data, titles_from_data=True)
+                chart.set_categories(cats)
+
+            chart_col = get_column_letter(ws.max_column + 2)
+            ws.add_chart(chart, f"{chart_col}1")
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
+            if url:
+                return f"Chart added: [{fname}]({url})"
+            return json.dumps({"error": self._err("could_not_save")})
+        except Exception as e:
+            return json.dumps({"error": f"Chart creation failed: {str(e)}"})
 
     # --- v3.2.0: Watermark ---
     async def add_watermark(self, file_id: str, text: str = "DRAFT", __user__=None, __request__=None) -> str:
@@ -3926,13 +4240,23 @@ class Tools:
                 pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
                 for page in pdf_doc:
                     rect = page.rect
-                    page.insert_text((rect.width/2-100, rect.height/2), text, fontsize=72, color=(0.5,0.5,0.5), alpha=0.1, rotate=45)
+                    # insert_text's `rotate` only accepts multiples of 90 -- an arbitrary
+                    # 45-degree diagonal needs `morph` (pivot point + rotation matrix)
+                    # instead. `alpha` isn't a real insert_text parameter; use fill_opacity.
+                    center = fitz.Point(rect.width / 2, rect.height / 2)
+                    mat = fitz.Matrix(1, 1).prerotate(45)
+                    page.insert_text(
+                        (rect.width / 2 - 100, rect.height / 2), text, fontsize=72,
+                        color=(0.5, 0.5, 0.5), fill_opacity=0.3, morph=(center, mat),
+                    )
                 buf = io.BytesIO()
                 pdf_doc.save(buf)
                 pdf_doc.close()
                 buf.seek(0)
             except ImportError:
                 return json.dumps({"error": "PyMuPDF not installed. Install with: pip install PyMuPDF"})
+            except Exception as e:
+                return json.dumps({"error": f"Watermark failed: {str(e)}"})
         else:
             return json.dumps({"error": f"Watermark not supported for {ftype}. Use DOCX or PDF."})
         
@@ -4014,6 +4338,22 @@ class Tools:
         return json.dumps({"error": self._err("could_not_save")})
 
     # --- v3.2.0: Accessibility Check ---
+    def _pptx_shape_cNvPr(self, shape):
+        """Return the shape's `p:cNvPr` XML element, or None. python-pptx has no `alt_text`
+        property on Shape/Picture (despite it being a natural-looking attribute name to
+        reach for) -- reading OR writing `shape.alt_text` silently creates/reads a throwaway
+        Python instance attribute that is never serialized to the file. Real alt text lives
+        in the `descr` attribute of this element."""
+        from pptx.oxml.ns import qn
+        el = shape._element
+        for tag in ("p:nvPicPr", "p:nvSpPr", "p:nvGrpSpPr", "p:nvCxnSpPr", "p:nvGraphicFramePr"):
+            nv = el.find(qn(tag))
+            if nv is not None:
+                cNvPr = nv.find(qn("p:cNvPr"))
+                if cNvPr is not None:
+                    return cNvPr
+        return None
+
     async def check_accessibility(self, file_id: str) -> str:
         """Check a DOCX or PPTX document for accessibility issues (heading structure, image alt
         text). Other formats (xlsx, pdf, etc.) return an explicit "not supported" result rather
@@ -4049,8 +4389,10 @@ class Tools:
             prs = Presentation(io.BytesIO(file_bytes))
             for i, slide in enumerate(prs.slides):
                 for shape in slide.shapes:
-                    if shape.shape_type == 13 and not shape.alt_text:
-                        issues.append(f"Slide {i+1}: Image missing alt text")
+                    if shape.shape_type == 13:
+                        cNvPr = self._pptx_shape_cNvPr(shape)
+                        if not (cNvPr is not None and cNvPr.get("descr")):
+                            issues.append(f"Slide {i+1}: Image missing alt text")
         
         if not issues:
             return f"Accessibility check passed for {filename}. No issues found."
@@ -4082,7 +4424,10 @@ class Tools:
         for shape in slide.shapes:
             if shape.shape_type == 13:
                 if pic_count == shape_index:
-                    shape.alt_text = alt_text
+                    cNvPr = self._pptx_shape_cNvPr(shape)
+                    if cNvPr is None:
+                        return json.dumps({"error": "Could not locate this image's XML element to set alt text."})
+                    cNvPr.set("descr", alt_text)
                     buf = io.BytesIO()
                     prs.save(buf)
                     buf.seek(0)
@@ -4106,20 +4451,36 @@ class Tools:
 
     # --- v3.3.0: Document Comparison ---
     async def compare_documents(self, file_id_a: str, file_id_b: str) -> str:
-        """Compare two documents and show differences."""
+        """Compare two documents and show differences. Supports xlsx, xls, docx, pptx, odt,
+        ods, odp, pdf. If either file is an unsupported format, returns an explicit error
+        instead of silently comparing empty text (which would falsely report "0 differences"
+        for two completely different files)."""
         a_bytes, a_name, a_type = self._resolve_file(file_id_a)
         b_bytes, b_name, b_type = self._resolve_file(file_id_b)
         if not a_bytes or not b_bytes:
             return json.dumps({"error": "One or both files not found"})
-        
+
+        _SUPPORTED = ("xlsx", "xls", "docx", "pptx", "odt", "ods", "odp", "pdf")
+        if a_type not in _SUPPORTED or b_type not in _SUPPORTED:
+            return json.dumps({
+                "error": f"compare_documents does not support this format pair ({a_type}, {b_type}). "
+                         f"Supported: {', '.join(_SUPPORTED)}."
+            })
+
         def get_text(ftype, fb, fn):
             if ftype in ("xlsx","xls"):
                 return self._read_xlsx(fb, fn) if ftype == "xlsx" else self._read_xls(fb, fn)
             elif ftype == "docx": return self._read_docx(fb, fn)
             elif ftype == "pptx": return self._read_pptx(fb, fn)
             elif ftype in ("odt","ods","odp"): return _read_odf(fb, fn)
+            elif ftype == "pdf":
+                import fitz
+                pdf = fitz.open(stream=fb, filetype="pdf")
+                text = "\n".join(pdf.load_page(i).get_text() for i in range(pdf.page_count))
+                pdf.close()
+                return text
             return ""
-        
+
         text_a = get_text(a_type, a_bytes, a_name)
         text_b = get_text(b_type, b_bytes, b_name)
         
@@ -4145,7 +4506,11 @@ class Tools:
 
     # --- v3.3.0: Export to Markdown ---
     async def export_to_markdown(self, file_id: str, __user__=None, __request__=None) -> str:
-        """Export any Office file to Markdown format.
+        """Export any Office file to Markdown format -- returns the extracted text INLINE
+        (capped at 8000 characters, with a truncation note) as well as saving it as a
+        downloadable .md file. For a long PDF where you need more than the first 8000
+        characters, use read_file(file_id, page_start=..., page_end=...) instead, which
+        pages through PDF text without a single-call size limit.
 
         For PDF specifically: this extracts the real embedded text directly (fast, one call,
         no OCR) with each page clearly labeled "--- Page N ---" -- use this first whenever you
@@ -4197,11 +4562,124 @@ class Tools:
         base = os.path.splitext(filename)[0]
         md_content = f"# {base}\n\n{content}"
         md_bytes = md_content.encode('utf-8')
-        
+
         url, fname = await self._save_and_link(md_bytes, f"{base}.md", __request__, __user__=__user__)
-        if url:
-            return f"Exported to Markdown: [{fname}]({url})"
-        return json.dumps({"error": self._err("could_not_save")})
+        if not url:
+            return json.dumps({"error": self._err("could_not_save")})
+
+        _INLINE_CAP = 8000
+        preview = content[:_INLINE_CAP]
+        if len(content) > _INLINE_CAP:
+            preview += f"\n\n...[truncated, {len(content) - _INLINE_CAP} more characters -- see the full file at the link below, or use read_file(page_start=...) for PDF]"
+        return f"Exported to Markdown: [{fname}]({url})\n\n{preview}"
+
+    async def find_text(self, file_id: str, query: str, max_results: int = 20, context_chars: int = 200) -> str:
+        """Find where a piece of text occurs in a document -- page (pdf/pptx), paragraph
+        index (docx), or cell (xlsx/xls) -- with a short surrounding snippet per hit.
+
+        Use this BEFORE add_comment/add_comments when you need to confirm where an excerpt
+        is (or whether it's unique) without reading the whole document. For PDF, this uses
+        the same word-level matching as add_comment's excerpt search, so a page reported
+        here is exactly the page add_comment will find that excerpt on.
+
+        Args:
+            file_id: File to search.
+            query: Exact text to find. May contain "..." to mark text omitted between two
+                quoted spans, same as add_comment's excerpt parameter.
+            max_results: Cap on the number of hits returned (default 20).
+            context_chars: Characters of surrounding context per hit (default 200; docx/xlsx
+                only -- pdf/pptx snippets are the matched shape/page text, already short).
+        """
+        file_bytes, filename, ftype = self._resolve_file(file_id)
+        if not file_bytes:
+            return json.dumps({"error": self._err("file_not_found")})
+
+        hits = []
+        if ftype == "pdf":
+            import fitz
+            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            qnorm = _normalize_match_text(_split_on_ellipsis(query)[0]) if _split_on_ellipsis(query) else ""
+            for pidx in range(pdf.page_count):
+                if len(hits) >= max_results:
+                    break
+                page = pdf.load_page(pidx)
+                occurrences, partial = self._pdf_find_all_excerpt_occurrences(page, query)
+                if not occurrences:
+                    continue
+                page_text_norm = _normalize_match_text(page.get_text())
+                snippet = page_text_norm
+                if qnorm:
+                    pos = page_text_norm.lower().find(qnorm.lower())
+                    if pos >= 0:
+                        start = max(0, pos - context_chars // 2)
+                        end = min(len(page_text_norm), pos + len(qnorm) + context_chars // 2)
+                        snippet = ("..." if start > 0 else "") + page_text_norm[start:end] + ("..." if end < len(page_text_norm) else "")
+                for _ in occurrences:
+                    hits.append({"page": pidx + 1, "snippet": snippet[:context_chars * 2]})
+                    if len(hits) >= max_results:
+                        break
+            pdf.close()
+
+        elif ftype == "docx":
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            paragraphs = list(doc.paragraphs)
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        paragraphs.extend(cell.paragraphs)
+            i = 1
+            while len(hits) < max_results:
+                para, runs, _offsets, _partial = self._docx_find_excerpt_runs(doc, query, i)
+                if not para:
+                    break
+                try:
+                    idx = list(doc.paragraphs).index(para)
+                except ValueError:
+                    idx = None
+                text = para.text
+                snippet = text[:context_chars] + ("..." if len(text) > context_chars else "")
+                hits.append({"paragraph_index": idx, "in_table": idx is None, "snippet": snippet})
+                i += 1
+
+        elif ftype == "pptx":
+            from pptx import Presentation
+            prs = Presentation(io.BytesIO(file_bytes))
+            qnorm = _normalize_match_text(query).lower()
+            for si, slide in enumerate(prs.slides, 1):
+                if len(hits) >= max_results:
+                    break
+                for shape in slide.shapes:
+                    if not (hasattr(shape, "text") and shape.text):
+                        continue
+                    t = shape.text
+                    if qnorm and qnorm in _normalize_match_text(t).lower():
+                        snippet = t[:context_chars] + ("..." if len(t) > context_chars else "")
+                        hits.append({"slide": si, "snippet": snippet})
+                        if len(hits) >= max_results:
+                            break
+
+        elif ftype in ("xlsx", "xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True) if ftype == "xlsx" else None
+            if ftype == "xls":
+                return json.dumps({"error": "find_text does not support legacy .xls -- convert to .xlsx first."})
+            qnorm = _normalize_match_text(query).lower()
+            for ws in wb.worksheets:
+                if len(hits) >= max_results:
+                    break
+                for row in ws.iter_rows():
+                    if len(hits) >= max_results:
+                        break
+                    for cell in row:
+                        if cell.value and qnorm in _normalize_match_text(str(cell.value)).lower():
+                            hits.append({"sheet": ws.title, "cell": cell.coordinate, "snippet": str(cell.value)[:context_chars]})
+                            if len(hits) >= max_results:
+                                break
+        else:
+            return json.dumps({"error": f"find_text not supported for {ftype}. Supported: pdf, docx, pptx, xlsx."})
+
+        return json.dumps({"query": query, "matches": len(hits), "hits": hits}, indent=2, ensure_ascii=False)
 
     # --- v3.3.0: Import from URL ---
     async def import_from_url(self, url: str, title: str = "Web Document", __user__=None, __request__=None) -> str:
@@ -4209,6 +4687,9 @@ class Tools:
         are stripped with regex (no readability/main-content detection), so nav bars, footers,
         and script/style text may leak into the output alongside the real article text.
         Content is truncated to the first 50,000 characters."""
+        url_err = _validate_outbound_url(url)
+        if url_err:
+            return json.dumps({"error": url_err})
         try:
             import urllib.request as _urllib
             req = _urllib.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -4228,8 +4709,13 @@ class Tools:
         
         if not text:
             return json.dumps({"error": "No text content extracted from URL"})
-        
-        return await self.generate_document(text[:50000], title, __user__=__user__, __request__=__request__)
+
+        doc_result = await self.generate_document(text[:50000], title, __user__=__user__, __request__=__request__)
+        _INLINE_CAP = 4000
+        preview = text[:_INLINE_CAP]
+        if len(text) > _INLINE_CAP:
+            preview += f"\n...[truncated, {len(text) - _INLINE_CAP} more characters -- see the full file at the link above]"
+        return f"{doc_result}\n\n{preview}"
 
     # --- v3.3.0: File Versioning ---
     async def version_file(self, file_id: str, label: str = "", __user__=None, __request__=None) -> str:
@@ -4314,24 +4800,25 @@ class Tools:
                     pdf = fitz.open(stream=file_bytes, filetype="pdf")
                     total_pages = pdf.page_count
                     pages_to_process = total_pages if max_pages <= 0 else min(total_pages, max_pages)
-                    loop = _asyncio.get_event_loop()
+                    loop = _asyncio.get_running_loop()
 
-                    def _ocr_page(page_bytes, width, height, lang):
-                        # Runs in a worker thread: PDF page render + Tesseract subprocess call
-                        # both block, so this whole function must never run on the main event
-                        # loop -- that's what froze the server on large PDFs before this fix.
-                        img = Image.frombytes("RGB", [width, height], page_bytes)
+                    def _ocr_page(page_index, lang):
+                        # Runs in a worker thread: PDF page RENDER (get_pixmap, ~100-300ms
+                        # of GIL-blocking C code) and the Tesseract subprocess call both
+                        # block, so both now happen here -- previously get_pixmap ran on
+                        # the main event loop before handing only the OCR step off, so a
+                        # 25-page document still froze the server for several seconds
+                        # during rendering alone.
+                        page = pdf.load_page(page_index)
+                        pix = page.get_pixmap(dpi=200)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                         return pytesseract.image_to_string(img, lang=lang)
 
                     results = []
                     for i in range(pages_to_process):
-                        page = pdf.load_page(i)
-                        pix = page.get_pixmap(dpi=200)
                         try:
                             text = await _asyncio.wait_for(
-                                loop.run_in_executor(
-                                    None, _ocr_page, pix.samples, pix.width, pix.height, language
-                                ),
+                                loop.run_in_executor(None, _ocr_page, i, language),
                                 timeout=60,
                             )
                         except _asyncio.TimeoutError:
@@ -4477,6 +4964,14 @@ class Tools:
         is older than a fixed 30 days -- not configurable, no confirmation step), stats."""
         import glob as _glob, time as _time
         uploads = _UPLOAD_DIR
+        # `pattern` is caller-supplied and fed straight into glob() -- ".."  or a path
+        # separator would let it walk outside the uploads directory entirely (e.g.
+        # pattern="../../*" reaching arbitrary files on the host), and delete_old would
+        # then PERMANENTLY DELETE whatever matched. Reject it outright rather than trying
+        # to sanitize a glob pattern.
+        if ".." in pattern or "/" in pattern or "\\" in pattern or os.path.isabs(pattern):
+            return json.dumps({"error": "Invalid pattern -- must be a simple glob within the uploads folder (no '..', '/', or '\\\\')."})
+        uploads_real = os.path.realpath(uploads)
         if operation == "list":
             files = sorted(_glob.glob(os.path.join(uploads, pattern)))
             if not files: return "No files found matching: " + str(pattern)
@@ -4491,6 +4986,10 @@ class Tools:
             cutoff = _time.time() - (30 * 86400)
             deleted = 0
             for f in _glob.glob(os.path.join(uploads, pattern)):
+                # Belt-and-suspenders: even with the pattern check above, confirm the
+                # resolved path is still inside the uploads directory before removing it.
+                if not os.path.realpath(f).startswith(uploads_real + os.sep):
+                    continue
                 if os.path.getmtime(f) < cutoff:
                     os.remove(f); deleted += 1
             return "Deleted " + str(deleted) + " files older than 30 days."
@@ -4502,9 +5001,11 @@ class Tools:
 
     # --- v3.4.0: File Search ---
     async def file_search(self, query: str, file_type: str = "all") -> str:
-        """Search for text across all generated files. file_type: all, xlsx, docx, pptx (pdf is
-        NOT supported -- pdf files are never matched despite matching a broad glob pattern, so
-        omit file_type='pdf')."""
+        """Search for text across files in the uploads folder. file_type: all, xlsx, docx,
+        pptx, pdf. Note: only matches files that keep a real extension on disk (typically
+        user uploads) -- files this plugin itself creates are saved without a filename/
+        extension on disk (the human-readable name only lives in Open WebUI's file record),
+        so freshly generated documents will not show up here."""
         import glob as _glob
         results = []
         patterns = {"all": "*.*", "xlsx": "*.xlsx", "docx": "*.docx", "pptx": "*.pptx", "pdf": "*.pdf"}
@@ -4514,7 +5015,18 @@ class Tools:
                 fname = os.path.basename(fpath)
                 ext = os.path.splitext(fname)[1].lower()
                 with open(fpath, 'rb') as f: fb = f.read()
-                if ext == ".xlsx":
+                if ext == ".pdf":
+                    import fitz
+                    pdf = fitz.open(stream=fb, filetype="pdf")
+                    for pidx in range(pdf.page_count):
+                        page_text = pdf.load_page(pidx).get_text()
+                        if query.lower() in page_text.lower():
+                            pos = page_text.lower().find(query.lower())
+                            snippet = page_text[max(0, pos - 40):pos + len(query) + 40].replace("\n", " ")
+                            results.append(f"{fname} (page {pidx + 1}): {snippet[:100]}")
+                            break
+                    pdf.close()
+                elif ext == ".xlsx":
                     import openpyxl, io
                     wb = openpyxl.load_workbook(io.BytesIO(fb))
                     for ws in wb.worksheets:
@@ -4565,12 +5077,12 @@ class Tools:
             formula = '"' + ",".join(vals) + '"'
             dv = DataValidation(type="list", formula1=formula, allow_blank=True)
         elif validation_type == "whole":
-            parts = values.split(",")
+            parts = [p.strip() for p in values.split(",") if p.strip()]
             mn = int(parts[0]) if parts else 0
             mx = int(parts[1]) if len(parts) > 1 else 100
             dv = DataValidation(type="whole", operator="between", formula1=str(mn), formula2=str(mx))
         elif validation_type == "decimal":
-            parts = values.split(",")
+            parts = [p.strip() for p in values.split(",") if p.strip()]
             mn = float(parts[0]) if parts else 0
             mx = float(parts[1]) if len(parts) > 1 else 100
             dv = DataValidation(type="decimal", operator="between", formula1=str(mn), formula2=str(mx))
@@ -4600,7 +5112,20 @@ class Tools:
         ws = wb.active
         if not range_str:
             range_str = "A1:" + get_column_letter(ws.max_column) + str(ws.max_row)
-        dn = DefinedName(name, attr_text=ws.title + "!$" + range_str.replace(":", ":$"))
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name) or re.fullmatch(r"[A-Za-z]{1,3}\d+", name):
+            return json.dumps({"error": f"Invalid name {name!r} -- must start with a letter/underscore, contain no spaces, and not look like a cell reference (e.g. 'Q1')."})
+        # Quote the sheet name if it needs it (contains a space or other character not
+        # legal in a bare reference) -- e.g. "Sales Data!$A$1" is not a valid Excel
+        # reference, it must be "'Sales Data'!$A$1". Also make the range fully absolute
+        # ($A$1:$B$10, not the old code's column-only "$A1:$B10") so it doesn't shift if
+        # rows/columns are later inserted.
+        sheet_title = ws.title
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", sheet_title):
+            sheet_ref = "'" + sheet_title.replace("'", "''") + "'"
+        else:
+            sheet_ref = sheet_title
+        abs_range = re.sub(r"([A-Za-z]+)(\d+)", r"$\1$\2", range_str)
+        dn = DefinedName(name, attr_text=f"{sheet_ref}!{abs_range}")
         wb.defined_names.add(dn)
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
@@ -4617,15 +5142,25 @@ class Tools:
         if ftype != "pptx": return json.dumps({"error": "Transitions only for PPTX"})
         from pptx import Presentation
         from pptx.util import Pt
+        from pptx.oxml.ns import qn
+        from lxml import etree
         prs = Presentation(io.BytesIO(file_bytes))
         real_types = ["fade", "push", "wipe", "split"]
+        failures = 0
         for slide in prs.slides:
             try:
-                from pptx.oxml.ns import qn
                 trans_elem = slide._element.find(qn('p:transition'))
-                if trans_elem is None:
-                    from lxml import etree
-                    trans_elem = etree.SubElement(slide._element, qn('p:transition'))
+                if trans_elem is not None:
+                    # Remove and rebuild rather than appending duplicate child elements
+                    # (e.g. two <p:fade/> under one <p:transition/>) on a second call.
+                    slide._element.remove(trans_elem)
+                trans_elem = etree.SubElement(slide._element, qn('p:transition'))
+                # CT_Slide requires p:transition to precede p:timing -- appending after an
+                # existing p:timing (the old code always appended last) produces
+                # out-of-schema-order XML that PowerPoint may flag for repair.
+                timing_elem = slide._element.find(qn('p:timing'))
+                if timing_elem is not None:
+                    timing_elem.addprevious(trans_elem)
                 this_type = _random.choice(real_types) if transition_type == "random" else transition_type
                 if this_type == "fade":
                     etree.SubElement(trans_elem, qn('p:fade'))
@@ -4637,11 +5172,15 @@ class Tools:
                     etree.SubElement(trans_elem, qn('p:split'))
                 trans_elem.set('advTm', str(int(duration * 1000)))
             except Exception:
-                pass
+                failures += 1
         buf = io.BytesIO(); prs.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
-        if url: return "Transitions added (" + str(transition_type) + "): [" + str(fname) + "](" + str(url) + ")"
-        return json.dumps({"error": self._err("could_not_save")})
+        if not url:
+            return json.dumps({"error": self._err("could_not_save")})
+        result = "Transitions added (" + str(transition_type) + "): [" + str(fname) + "](" + str(url) + ")"
+        if failures:
+            result += f"\n{failures} of {len(prs.slides)} slide(s) failed to get a transition."
+        return result
 
     # --- v3.4.0: Export to HTML ---
     async def export_to_html(self, file_id: str, __user__=None, __request__=None) -> str:
@@ -4807,18 +5346,27 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 return json.dumps({"error": f"Field '{data_field}' not found in headers: {headers[:20]}"})
         # Read and aggregate data
         agg_map = defaultdict(list)
+        skipped_non_numeric = 0
         for row in ws.iter_rows(min_row=2, values_only=True):
             row_key = str(row[row_idx]) if row[row_idx] is not None else "(blank)"
             if data_idx is not None and row[data_idx] is not None:
                 try:
                     agg_map[row_key].append(float(row[data_idx]))
                 except (ValueError, TypeError):
-                    agg_map[row_key].append(0.0)
+                    # A text-formatted number ("1,234.00", "$500") would previously coerce
+                    # to 0.0 and silently corrupt the sum/average -- skip it instead and
+                    # report the count, so a value doesn't get counted as zero.
+                    skipped_non_numeric += 1
             elif data_idx is None:
                 agg_map[row_key].append(1)  # count mode
-        # Compute aggregate
+        # Compute aggregate. Reuse the "Pivot" sheet name if it already exists -- openpyxl's
+        # create_sheet()/title setter silently DE-DUPLICATES a colliding name into "Pivot1",
+        # "Pivot2", etc. instead of raising, so a second run would write to a new sheet while
+        # this function's own success message kept saying "Pivot", leaving the user reading
+        # stale numbers in the sheet actually named "Pivot".
+        if "Pivot" in wb.sheetnames:
+            del wb["Pivot"]
         pivot_ws = wb.create_sheet("Pivot")
-        pivot_ws.title = "Pivot"
         agg_name = aggregate.lower()
         if agg_name == "count":
             pivot_ws.cell(row=1, column=1, value=rows_field)
@@ -4841,10 +5389,20 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                     pivot_ws.cell(row=r, column=2, value=max(vals) if vals else 0)
                 else:
                     pivot_ws.cell(row=r, column=2, value=sum(vals))
+        col2_header = "Count" if agg_name == "count" else f"{agg_name} of {data_field}"
+        preview_rows = []
+        for r in range(2, pivot_ws.max_row + 1):
+            preview_rows.append(f"| {pivot_ws.cell(row=r, column=1).value} | {pivot_ws.cell(row=r, column=2).value} |")
+        _PREVIEW_CAP = 50
+        preview = f"| {rows_field} | {col2_header} |\n|---|---|\n" + "\n".join(preview_rows[:_PREVIEW_CAP])
+        if len(preview_rows) > _PREVIEW_CAP:
+            preview += f"\n...({len(preview_rows) - _PREVIEW_CAP} more rows in the saved file)"
         result = f"Pivot table created in sheet 'Pivot' ({len(agg_map)} rows). Fields: rows={rows_field}, data={data_field}, aggregate={aggregate}"
+        if skipped_non_numeric:
+            result += f"\n{skipped_non_numeric} row(s) had a non-numeric {data_field!r} value and were excluded from the aggregate (not counted as 0)."
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
-        if url: return f"{result}: [{fname}]({url})"
+        if url: return f"{result}: [{fname}]({url})\n\n{preview}"
         return json.dumps({"error": self._err("could_not_save")})
 
     async def sql_to_spreadsheet(self, query: str, output_filename: str = "query_results", __user__=None, __request__=None) -> str:
@@ -4856,12 +5414,21 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         conn2 = sqlite3.connect(_DB_PATH)
         try:
             conn2.row_factory = sqlite3.Row
-            rows = conn2.execute(query).fetchall()
+            cursor = conn2.execute(query)
+            rows = cursor.fetchall()
+            # sqlite3's default isolation_level opens an implicit transaction for any DML
+            # statement; without an explicit commit(), conn2.close() below silently ROLLS
+            # IT BACK -- so a query like "UPDATE ..." would report "no results" while
+            # leaving the database completely unchanged, contradicting the docstring's
+            # promise that non-SELECT statements actually run.
+            conn2.commit()
         except Exception as e:
+            conn2.rollback()
             return json.dumps({"error": f"SQL error: {str(e)}"})
         finally:
             conn2.close()
-        if not rows: return "Query returned no results."
+        if not rows:
+            return f"Query executed (0 rows returned). If this was a write statement (INSERT/UPDATE/DELETE), it was committed -- {cursor.rowcount if cursor.rowcount >= 0 else 'unknown'} row(s) affected."
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
         wb = Workbook(); ws = wb.active
@@ -4875,8 +5442,16 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 ws.cell(row=i, column=j, value=row[key])
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url, fname = await self._save_and_link(buf.getvalue(), _ensure_ext(output_filename, "xlsx"), __request__, __user__=__user__)
-        if url: return f"Query results ({len(rows)} rows): [{fname}]({url})"
-        return json.dumps({"error": self._err("could_not_save")})
+        if not url:
+            return json.dumps({"error": self._err("could_not_save")})
+        _PREVIEW_CAP = 50
+        preview_lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+        for row in rows[:_PREVIEW_CAP]:
+            preview_lines.append("| " + " | ".join(str(row[h]) for h in headers) + " |")
+        preview = "\n".join(preview_lines)
+        if len(rows) > _PREVIEW_CAP:
+            preview += f"\n...({len(rows) - _PREVIEW_CAP} more rows in the saved file)"
+        return f"Query results ({len(rows)} rows): [{fname}]({url})\n\n{preview}"
 
     async def fill_pdf_form(self, file_id: str, field_values: str, __user__=None, __request__=None) -> str:
         """Fill a PDF form with values. field_values: 'field1=value1,field2=value2'."""
@@ -4893,16 +5468,33 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                     k, v = pair.split("=", 1)
                     pairs[k.strip()] = v.strip()
             filled = 0
+            matched_keys = set()
+            all_field_names = []
             for page in pdf:
                 for widget in page.widgets():
+                    all_field_names.append(widget.field_name)
                     if widget.field_name in pairs:
                         widget.field_value = pairs[widget.field_name]
                         widget.update()
                         filled += 1
+                        matched_keys.add(widget.field_name)
+            if filled == 0:
+                pdf.close()
+                unmatched = list(pairs.keys())
+                return json.dumps({
+                    "error": "No fields were filled -- none of the requested field names matched this PDF's form fields.",
+                    "requested_fields": unmatched,
+                    "actual_field_names": all_field_names,
+                })
             buf = io.BytesIO(); pdf.save(buf); pdf.close(); buf.seek(0)
             url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
-            if url: return f"Filled {filled} field(s): [{fname}]({url})"
-            return json.dumps({"error": self._err("could_not_save")})
+            if not url:
+                return json.dumps({"error": self._err("could_not_save")})
+            result = f"Filled {filled} field(s): [{fname}]({url})"
+            unmatched = [k for k in pairs if k not in matched_keys]
+            if unmatched:
+                result += f"\n{len(unmatched)} requested field(s) not found on this form: {unmatched}"
+            return result
         except ImportError:
             return json.dumps({"error": "PyMuPDF not installed"})
         except Exception as e:
@@ -4973,8 +5565,13 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             return json.dumps({"error": f"Unsupported target format: {target_format}. Use: csv, json, xml"})
         result_bytes = result.encode('utf-8')
         url, fname = await self._save_and_link(result_bytes, f"{base}{ext}", __request__, __user__=__user__)
-        if url: return f"Converted to {target_format.upper()}: [{fname}]({url})"
-        return json.dumps({"error": self._err("could_not_save")})
+        if not url:
+            return json.dumps({"error": self._err("could_not_save")})
+        _INLINE_CAP = 4000
+        preview = result[:_INLINE_CAP]
+        if len(result) > _INLINE_CAP:
+            preview += f"\n...[truncated, {len(result) - _INLINE_CAP} more characters -- see the full file at the link below]"
+        return f"Converted to {target_format.upper()}: [{fname}]({url})\n\n{preview}"
 
     # === v3.6.0: Enterprise Features ===
 
@@ -5121,17 +5718,23 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         
         if not rows:
             return json.dumps({"error": "No data rows found"})
-        
+
+        _MAX_ROWS = 200
+        truncated_note = ""
+        if len(rows) > _MAX_ROWS:
+            truncated_note = f"\n\nData had {len(rows)} rows; only the first {_MAX_ROWS} were assembled."
+            rows = rows[:_MAX_ROWS]
+
         # Generate one document per data row
         results = []
         for i, row in enumerate(rows):
             content = template_content
             for key, value in row.items():
-                content = content.replace(f"{{{key}}}", str(value))
+                content = content.replace(f"{{{{{key}}}}}", str(value)).replace(f"{{{key}}}", str(value))
             result = await self.generate_document(content, f"{output_prefix}_{i+1}", __user__=__user__, __request__=__request__)
             results.append(result)
-        
-        return f"Assembled {len(results)} documents from template '{template_name}'."
+
+        return f"Assembled {len(results)} documents from template '{template_name}':\n\n" + "\n".join(results) + truncated_note
 
     async def conditional_format(self, file_id: str, rules: str, __user__=None, __request__=None) -> str:
         """Apply conditional formatting rules to Excel. rules: 'col:A,op:>,val:100,color:27AE60;col:B,op:<,val:0,color:E74C3C'."""
@@ -5169,7 +5772,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
     # === v3.6.0: Collaboration Features ===
 
-    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, page_num: int = 1, excerpt: str = "", match_index: int = 1, __user__=None, __request__=None) -> str:
+    async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", paragraph_index: int = 0, cell_ref: str = "A1", slide_num: int = 1, page_num: Optional[int] = None, excerpt: str = "", match_index: int = 1, __user__=None, __request__=None) -> str:
         """Add ONE review comment to a Word, Excel, PowerPoint, or PDF file -- for 2+ comments,
         call add_comments() instead (one call, one output file); calling add_comment() in a
         loop creates a separate file per comment, not one file with all the comments.
@@ -5187,15 +5790,20 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 excerpt is empty or not found (default 0)
             cell_ref: For XLSX: cell reference (default "A1")
             slide_num: For PPTX: slide number (default 1)
-            page_num: For PDF: page number to search on. Required for PDF; used as-is when
-                excerpt is empty (default 1)
+            page_num: For PDF: page number to search on. Optional when `excerpt` is given --
+                every page is searched in order and the comment lands wherever the excerpt is
+                found (no need to know the page in advance). Required when `excerpt` is empty
+                (nowhere else to place the sticky note), and used as the fallback location if
+                a given excerpt isn't found anywhere.
             excerpt: For DOCX/PDF: exact quoted text to locate and anchor the comment to.
                 Recommended over paragraph_index/fixed positioning -- highlights the matched
                 text (PDF) or the matched run(s) (DOCX) instead of the whole paragraph/page.
                 May contain "..." to mark text omitted between two quoted spans; the omitted
-                middle is never searched for literally.
-            match_index: If excerpt appears more than once, which occurrence to use
-                (1-based, default 1)
+                middle is never searched for literally. For PDF, use find_text() first if
+                you're unsure an excerpt is unique or want to confirm which page it's on.
+            match_index: If excerpt appears more than once, which occurrence to use (1-based,
+                default 1). For PDF, this counts occurrences across the WHOLE document when
+                page_num is omitted, or on just that page when page_num is given.
         """
         import io
         file_bytes, filename, ftype = self._resolve_file(file_id)
@@ -5430,7 +6038,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             try:
                 import fitz
                 pdf = fitz.open(stream=file_bytes, filetype="pdf")
-                err, warning = self._pdf_add_comment_annot(pdf, page_num, text, author, excerpt=excerpt, match_index=match_index)
+                err, warning, page_used = self._pdf_add_comment_annot(pdf, page_num, text, author, excerpt=excerpt, match_index=match_index)
                 if err:
                     pdf.close()
                     return json.dumps({"error": err})
@@ -5440,7 +6048,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 buf.seek(0)
                 url, fname = await self._save_and_link(buf.getvalue(), filename, __request__, __user__=__user__)
                 if url:
-                    msg = f"Comment added by {author} on page {page_num}: [{fname}]({url})"
+                    msg = f"Comment added by {author} on page {page_used}: [{fname}]({url})"
                     if warning:
                         msg += f"\nWarning: {warning}"
                     return msg
@@ -5451,73 +6059,156 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         else:
             return json.dumps({"error": f"Comments not supported for {ftype}. Supported: DOCX, XLSX, PPTX, PDF."})
 
-    def _pdf_find_excerpt_quads(self, page, excerpt: str, match_index: int = 1):
-        """Search for an excerpt's text on a fitz Page.
+    def _pdf_find_all_excerpt_occurrences(self, page, excerpt: str):
+        """Find every occurrence of an excerpt on a fitz Page, word-by-word.
 
-        Handles excerpts containing '...'/'…' (which mark text omitted between two
-        quoted spans and never appear literally in the source file): tries the full
+        `page.search_for` returns one rect PER LINE FRAGMENT, not per occurrence -- a
+        quote that wraps a line comes back as 2+ separate rects for what is really one
+        match, which breaks any attempt to count/index "occurrences" on top of it. This
+        instead tokenizes the page via `page.get_text("words")` (each word carries its
+        own rect) and slides the excerpt's word sequence over the page's word sequence,
+        comparing punctuation-stripped, case-folded tokens. Each match's rects (one per
+        word in the match, correctly spanning line wraps) are grouped as one occurrence.
+
+        Handles excerpts containing '...'/'…' the same way as before: tries the full
         normalized excerpt first, then falls back to just the text before the first
         ellipsis.
 
-        `page.search_for` matches the PDF's literal embedded text -- we can only
-        normalize our query, not the PDF content -- so for each candidate we try a
-        few quote-style variants (straight, as-given, and a curly-quote guess),
-        since professionally typeset PDFs commonly use smart quotes that a
-        copy-pasted excerpt (usually straight quotes) won't match verbatim.
-
-        Returns (rects: list[fitz.Rect], partial: bool) on a match, or (None, False)
-        if nothing was found.
+        Returns (occurrences: list[list[fitz.Rect]], partial: bool) in reading order.
+        `occurrences` is [] if nothing matched either candidate.
         """
+        import fitz
+        import string as _string_mod
+
         segments = _split_on_ellipsis(excerpt)
         if not segments:
-            return None, False
+            return [], False
 
         candidates = [(_normalize_match_text(excerpt), False)]
         if len(segments) > 1 and segments[0] != candidates[0][0]:
             candidates.append((segments[0], True))
 
+        words = page.get_text("words")
+        # sort into reading order: block, then line, then word position
+        words = sorted(words, key=lambda w: (w[5], w[6], w[7]))
+        page_tokens = [_normalize_chars(w[4]).lower().strip(_string_mod.punctuation) for w in words]
+
         for candidate_text, partial in candidates:
             if not candidate_text:
                 continue
-            for variant in _quote_style_variants(candidate_text):
-                rects = page.search_for(variant)
-                if rects:
-                    idx = match_index - 1
-                    rect = rects[idx] if 0 <= idx < len(rects) else rects[0]
-                    return [rect], partial
-        return None, False
+            q_tokens = [
+                t.strip(_string_mod.punctuation)
+                for t in re.findall(r"\S+", _normalize_chars(candidate_text).lower())
+            ]
+            q_tokens = [t for t in q_tokens if t]
+            if not q_tokens:
+                continue
+            n, m = len(page_tokens), len(q_tokens)
+            occurrences = []
+            for i in range(n - m + 1):
+                if page_tokens[i:i + m] == q_tokens:
+                    occurrences.append([fitz.Rect(words[k][:4]) for k in range(i, i + m)])
+            if occurrences:
+                return occurrences, partial
+        return [], False
 
-    def _pdf_add_comment_annot(self, pdf, page_num: int, text: str, author: str, excerpt: str = "", match_index: int = 1):
+    def _pdf_find_excerpt_quads(self, page, excerpt: str, match_index: int = 1):
+        """Find the match_index'th occurrence of an excerpt on a fitz Page.
+
+        Thin wrapper around `_pdf_find_all_excerpt_occurrences` for callers that want a
+        single indexed occurrence (kept for compatibility with existing call sites).
+
+        Returns (rects: list[fitz.Rect] or None, partial: bool, occurrence_count: int).
+        `rects` is None both when nothing matched (occurrence_count == 0) and when
+        match_index is out of range for the matches found (occurrence_count > 0) --
+        callers must check occurrence_count to tell these apart.
+        """
+        occurrences, partial = self._pdf_find_all_excerpt_occurrences(page, excerpt)
+        if not occurrences:
+            return None, False, 0
+        idx = match_index - 1
+        if not (0 <= idx < len(occurrences)):
+            return None, partial, len(occurrences)
+        return occurrences[idx], partial, len(occurrences)
+
+    def _pdf_add_comment_annot(self, pdf, page_num, text: str, author: str, excerpt: str = "", match_index: int = 1):
         """Add one comment annotation to an already-open fitz PDF.
 
-        Without `excerpt`: sticky-note icon at a fixed default position (legacy behavior).
-        With `excerpt`: highlights the matched text on the page and attaches the comment
+        `page_num` (1-based) may be None when `excerpt` is given -- in that case every
+        page is searched in order and `match_index` counts occurrences across the WHOLE
+        document (not per-page), so the caller doesn't need to know the page in advance.
+        `page_num` is still required when `excerpt` is empty (nowhere else to place the
+        sticky note) or as the fallback location if the excerpt isn't found anywhere.
+
+        Without `excerpt`: sticky-note icon at a fixed default position on `page_num`
+        (legacy behavior; `page_num` required).
+        With `excerpt`: highlights the matched text (all rects of the matched occurrence,
+        so a quote spanning a line wrap is highlighted in full) and attaches the comment
         to that highlight -- clicking it in a PDF reader shows author + text, same as a
         manual "select text, add comment" in Acrobat/Preview. If the excerpt can't be
-        found on the page, falls back to the sticky note and reports a warning instead of
-        silently mis-placing the comment.
+        found anywhere (or `match_index` exceeds the occurrences found), falls back to a
+        sticky note on `page_num` (if given) and reports a warning -- never silently
+        mis-places the comment on the wrong occurrence.
 
-        Returns (error: Optional[str], warning: Optional[str]).
+        Returns (error: Optional[str], warning: Optional[str], page_used: Optional[int]).
         """
         import fitz
-        if page_num < 1 or page_num > pdf.page_count:
-            return f"Page {page_num} not found in PDF (has {pdf.page_count} pages).", None
-        page = pdf.load_page(page_num - 1)
+
+        if page_num is not None and (page_num < 1 or page_num > pdf.page_count):
+            return f"Page {page_num} not found in PDF (has {pdf.page_count} pages).", None, None
 
         if excerpt:
-            rects, partial = self._pdf_find_excerpt_quads(page, excerpt, match_index)
-            if rects:
-                annot = page.add_highlight_annot(rects)
-                annot.set_info(title=author, content=text, subject="Comment")
-                warning = "Matched only the text before the '...' in the excerpt -- verify placement." if partial else None
-                return None, warning
+            pages_to_search = [page_num - 1] if page_num is not None else list(range(pdf.page_count))
+            remaining = match_index
+            total_found = 0
+            partial_any = False
+            for pidx in pages_to_search:
+                page = pdf.load_page(pidx)
+                occurrences, partial = self._pdf_find_all_excerpt_occurrences(page, excerpt)
+                if partial:
+                    partial_any = True
+                total_found += len(occurrences)
+                if len(occurrences) >= remaining and remaining >= 1:
+                    rects = occurrences[remaining - 1]
+                    annot = page.add_highlight_annot(rects)
+                    annot.set_info(title=author, content=text, subject="Comment")
+                    warning = (
+                        "Matched only the text before the '...' in the excerpt -- verify placement."
+                        if partial else None
+                    )
+                    return None, warning, pidx + 1
+                remaining -= len(occurrences)
+
+            # Not found (or match_index exceeded total occurrences across all pages searched).
+            if page_num is None:
+                if total_found > 0:
+                    return (
+                        f"Excerpt found {total_found} time(s) across the document, but "
+                        f"match_index={match_index} is out of range and no page_num was given "
+                        f"to fall back to.",
+                        None,
+                        None,
+                    )
+                return f"Excerpt not found anywhere in the {pdf.page_count}-page document.", None, None
+
+            page = pdf.load_page(page_num - 1)
             annot = page.add_text_annot(fitz.Point(72, 72), text)
             annot.set_info(title=author, content=text, subject="Comment")
-            return None, f"Excerpt not found on page {page_num} -- placed a default sticky note instead of highlighting the text."
+            if total_found > 0:
+                warning = (
+                    f"Excerpt found {total_found} time(s), but match_index={match_index} is out "
+                    f"of range -- placed a default sticky note on page {page_num} instead."
+                )
+            else:
+                warning = f"Excerpt not found on page {page_num} -- placed a default sticky note instead of highlighting the text."
+            return None, warning, page_num
 
+        if page_num is None:
+            return "page_num is required when excerpt is not given.", None, None
+        page = pdf.load_page(page_num - 1)
         annot = page.add_text_annot(fitz.Point(72, 72), text)
         annot.set_info(title=author, content=text, subject="Comment")
-        return None, None
+        return None, None, page_num
 
     def _docx_find_excerpt_runs(self, doc, excerpt: str, match_index: int = 1):
         """Locate an excerpt across a DOCX's body paragraphs and table cells.
@@ -5583,12 +6274,23 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
         Returns the run containing exactly text[start:end] -- the piece to anchor a
         comment to. If the span already covers the whole run, returns it unchanged.
+
+        Runs holding non-text content (inline images, line breaks, field/footnote refs)
+        can't be safely split via text reassignment -- `Run.text`'s setter calls
+        `clear_content()`, which would silently delete that non-text content along with
+        the text. Such a run is returned unchanged instead (widening the anchored span
+        to the whole run rather than destroying its content).
         """
         from copy import deepcopy
         from docx.text.run import Run
+        from docx.oxml.ns import qn
 
         text = run.text
         if start <= 0 and end >= len(text):
+            return run
+
+        preserved_tags = {qn("w:t"), qn("w:rPr")}
+        if any(child.tag not in preserved_tags for child in run._r):
             return run
 
         before, middle, after = text[:start], text[start:end], text[end:]
@@ -5618,13 +6320,15 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         With `excerpt`: locates the exact quoted text (paragraphs + table cells) and
         anchors the comment to just that span when it fits in one run, or to the
         minimal set of overlapping runs when the quote crosses a formatting boundary.
-        Falls back to `paragraph_index` (whole-paragraph, legacy behavior) with a
-        warning if the excerpt isn't found -- never silently mis-places the comment.
+        If the excerpt isn't found and `paragraph_index` was explicitly given, falls back
+        to that whole-paragraph anchor with a warning. If the excerpt isn't found and NO
+        `paragraph_index` was given, returns an error instead of guessing -- placing an
+        unmatched comment on paragraph 0 by default would silently stack every unmatched
+        entry from a batch onto the title, which is worse than reporting the miss.
         Without `excerpt`: behaves exactly as before (whole-paragraph anchor).
 
         Returns (error: Optional[str], warning: Optional[str]).
         """
-        fallback_warning = None
         if excerpt:
             para, runs, single_offsets, partial = self._docx_find_excerpt_runs(doc, excerpt, match_index)
             if runs:
@@ -5639,7 +6343,8 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                     if partial:
                         warning = "Matched only the text before the '...', and the match spans a formatting boundary -- verify placement."
                 return None, warning
-            fallback_warning = "Excerpt not found in the document -- fell back to paragraph_index."
+            if paragraph_index is None:
+                return "Excerpt not found anywhere in the document, and no paragraph_index was given as a fallback.", None
 
         idx = paragraph_index if paragraph_index is not None else 0
         if not doc.paragraphs:
@@ -5650,6 +6355,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         if not para.runs:
             para.add_run("")
         doc.add_comment(para.runs, text=text, author=author)
+        fallback_warning = "Excerpt not found in the document -- fell back to paragraph_index." if excerpt else None
         return None, fallback_warning
 
     async def add_comments(self, file_id: str, comments: list, __user__=None, __request__=None) -> str:
@@ -5670,13 +6376,16 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 excerpt: Exact quoted text to locate and anchor the comment to (recommended).
                     May contain "..." to mark omitted text between two quoted spans.
                 match_index: If excerpt appears more than once, which occurrence to use
-                    (1-based, default 1)
-                page_num: PDF only -- always required. Unlike DOCX, excerpt search is scoped
-                    to a single page, so page_num says which page to search (and is also the
-                    fallback position if the excerpt isn't found there).
+                    (1-based, default 1). For PDF, counts across the whole document when
+                    page_num is omitted, or on just that page when page_num is given.
+                page_num: PDF only -- optional when excerpt is given (every page is searched
+                    in order). Required when excerpt is empty (nowhere else to place the
+                    sticky note), and used as the fallback position if a given excerpt isn't
+                    found anywhere. Use find_text() first if you want to confirm a page.
                 paragraph_index: DOCX only -- optional. DOCX excerpt search scans the whole
                     document, so this is only used as a fallback if excerpt is omitted or
-                    not found anywhere.
+                    not found anywhere. If excerpt IS given but not found, the entry is
+                    reported as an error rather than guessed at (no silent mis-placement).
         """
         file_bytes, filename, ftype = self._resolve_file(file_id)
         if not file_bytes:
@@ -5692,6 +6401,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             applied = 0
             errors = []
             warnings = []
+            placements = []
             for i, c in enumerate(comments):
                 page_num = c.get("page_num")
                 text = c.get("text")
@@ -5701,14 +6411,15 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 if text is None:
                     errors.append(f"entry {i}: missing text")
                     continue
-                if page_num is None:
-                    errors.append(f"entry {i}: missing page_num")
+                if page_num is None and not excerpt:
+                    errors.append(f"entry {i}: missing page_num (required when excerpt is not given)")
                     continue
-                err, warning = self._pdf_add_comment_annot(pdf, page_num, text, author, excerpt=excerpt, match_index=match_index)
+                err, warning, page_used = self._pdf_add_comment_annot(pdf, page_num, text, author, excerpt=excerpt, match_index=match_index)
                 if err:
                     errors.append(f"entry {i}: {err}")
                     continue
                 applied += 1
+                placements.append(f"entry {i}: page {page_used}")
                 if warning:
                     warnings.append(f"entry {i}: {warning}")
 
@@ -5727,6 +6438,7 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
             applied = 0
             errors = []
             warnings = []
+            placements = []
             for i, c in enumerate(comments):
                 text = c.get("text")
                 author = c.get("author", "Reviewer")
@@ -5755,6 +6467,8 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         if not url:
             return json.dumps({"error": self._err("could_not_save")})
         result = f"Added {applied} comment(s) to [{fname}]({url})"
+        if placements:
+            result += f"\nPlacements: {'; '.join(placements)}"
         if errors:
             result += f"\n{len(errors)} entries skipped: {'; '.join(errors)}"
         if warnings:
@@ -5771,17 +6485,33 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         if not file_bytes: return json.dumps({"error": self._err("file_not_found")})
         base = os.path.splitext(filename)[0]
         ext = os.path.splitext(filename)[1]
-        import glob as _glob, time as _time
-        pattern = os.path.join(_UPLOAD_DIR, f"{base}_v*{ext}")
-        versions = sorted(_glob.glob(pattern), reverse=True)
-        if not versions: return f"No previous versions found for {filename}. Use version_file() to create versions."
+        import time as _time
+        # version_file() saves through _save_and_link, which writes the file to disk as a
+        # bare UUID with NO name/extension -- the human filename only lives in the DB
+        # `filename` column (base64-encoded). Globbing the upload directory for
+        # "{base}_v*{ext}" (the old code) can never match anything on disk; versions have to
+        # be found by decoding each DB filename instead.
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            rows = conn.execute("SELECT id, filename, created_at FROM file").fetchall()
+        finally:
+            conn.close()
+        candidates = []
+        for vid, encoded_name, created_at in rows:
+            decoded = _decode_filename(encoded_name) if encoded_name else ""
+            if decoded.startswith(f"{base}_v") and decoded.endswith(ext):
+                candidates.append((vid, decoded, created_at))
+        if not candidates:
+            return f"No previous versions found for {filename}. Use version_file() to create versions."
         if version_label:
-            versions = [v for v in versions if version_label in v]
-            if not versions: return f"No version matching '{version_label}' found."
-        latest = versions[0]
-        vname = os.path.basename(latest)
-        vtime = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(os.path.getmtime(latest)))
-        with open(latest, 'rb') as f: vbytes = f.read()
+            candidates = [c for c in candidates if version_label in c[1]]
+            if not candidates: return f"No version matching '{version_label}' found."
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        vid, vname, created_at = candidates[0]
+        vbytes = _read_file_bytes(vid)
+        if not vbytes:
+            return json.dumps({"error": f"Version record found ({vname}) but its file content is missing on disk."})
+        vtime = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(created_at))
         if ftype in ("xlsx","xls"):
             curr = self._read_xlsx(file_bytes, filename) if ftype == "xlsx" else self._read_xls(file_bytes, filename)
             prev = self._read_xlsx(vbytes, vname) if ftype == "xlsx" else self._read_xls(vbytes, vname)
@@ -5802,6 +6532,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         """Trigger a webhook on document events. event: test, created, edited, deleted."""
         if not url:
             return json.dumps({"error": "url parameter required"})
+        url_err = _validate_outbound_url(url)
+        if url_err:
+            return json.dumps({"error": url_err})
         import urllib.request as _urllib
         payload = json.dumps({"event": event, "file_id": file_id, "timestamp": __import__('time').time()}).encode()
         try:
@@ -5821,6 +6554,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 lists). Leave empty to use the whole response body.
             output_filename: Output filename (".xlsx" appended if missing).
         """
+        url_err = _validate_outbound_url(url)
+        if url_err:
+            return json.dumps({"error": url_err})
         import urllib.request as _urllib, io
         try:
             req = _urllib.Request(url, headers={"Accept": "application/json", "User-Agent": "OpenWebUI/1.0"})
@@ -5841,16 +6577,38 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
         from openpyxl.styles import Font, PatternFill
         wb = Workbook(); ws = wb.active
         if data and isinstance(data[0], dict):
-            headers = list(data[0].keys())
-            for j, h in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=j, value=h)
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-            for i, item in enumerate(data, 2):
-                for j, key in enumerate(headers, 1):
-                    ws.cell(row=i, column=j, value=str(item.get(key, "")))
+            # Union of keys across all records -- a single record's keys would silently
+            # drop columns only present on later, heterogeneous records.
+            headers = []
+            for item in data:
+                if isinstance(item, dict):
+                    for k in item.keys():
+                        if k not in headers:
+                            headers.append(k)
+        elif data:
+            # List of scalars (e.g. data_path="ids" -> [1,2,3]) -- one "value" column,
+            # instead of writing nothing and reporting a false "N records imported".
+            headers = ["value"]
+            data = [{"value": item} for item in data]
+        else:
+            headers = []
+        for j, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=j, value=h)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        for i, item in enumerate(data, 2):
+            for j, key in enumerate(headers, 1):
+                ws.cell(row=i, column=j, value=str(item.get(key, "")) if isinstance(item, dict) else str(item))
         buf = io.BytesIO(); wb.save(buf); buf.seek(0)
         url_out, fname = await self._save_and_link(buf.getvalue(), _ensure_ext(output_filename, "xlsx"), __request__, __user__=__user__)
-        if url_out: return f"Imported {len(data)} records from API: [{fname}]({url_out})"
-        return json.dumps({"error": self._err("could_not_save")})
+        if not url_out:
+            return json.dumps({"error": self._err("could_not_save")})
+        _PREVIEW_CAP = 50
+        preview_lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)] if headers else []
+        for item in data[:_PREVIEW_CAP]:
+            preview_lines.append("| " + " | ".join(str(item.get(h, "")) for h in headers) + " |")
+        preview = "\n".join(preview_lines)
+        if len(data) > _PREVIEW_CAP:
+            preview += f"\n...({len(data) - _PREVIEW_CAP} more records in the saved file)"
+        return f"Imported {len(data)} records from API: [{fname}]({url_out})\n\n{preview}"
 

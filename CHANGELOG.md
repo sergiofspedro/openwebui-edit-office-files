@@ -5,6 +5,122 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - 2026-08-15
+
+Full bug-fix sweep of the whole file (~5900 lines, all 70 functions), triggered by a real
+workflow failing three sessions in a row: placing excerpt-anchored review comments across a
+156-page PDF. Root cause traced to two compounding bugs -- `add_comments` required a `page_num`
+the model had no way to discover, and `export_to_markdown`/`read_file` extracted PDF text
+perfectly then returned only a download link the model couldn't open. Fixing that led to a
+full audit that surfaced ~60 real defects. Breaking change in one place: several functions that
+previously reported false "success" now return an explicit error instead (see below) -- this is
+the point of the release, not an oversight.
+
+### Added
+- `find_text(file_id, query, ...)` -- locate an excerpt's page/paragraph/cell before commenting,
+  without reading the whole document. PDF matching shares the same word-level logic as
+  `add_comment`/`add_comments`, so a page `find_text` reports is guaranteed to be the page a
+  comment lands on.
+- `page_num` is now optional for PDF in `add_comment`/`add_comments` -- when omitted, every page
+  is searched in order and the comment lands wherever the excerpt is found; `match_index` then
+  counts occurrences across the whole document instead of one page.
+- `read_file` gained a `pdf` branch (with `page_start`/`page_end` paging) -- previously the only
+  way to get PDF text into a response was the much slower `ocr_extract`.
+
+### Fixed -- comment-anchoring correctness (the bugs behind the original failure)
+- `_pdf_find_excerpt_quads` mis-indexed matches: PyMuPDF's `search_for` returns one rect per
+  *line fragment*, not per occurrence, so a quote wrapping a line broke `match_index` counting
+  and only half-highlighted the match. Rewritten on word-level matching (`page.get_text("words")`)
+  so occurrences are grouped correctly and a wrapped quote is highlighted in full.
+- DOCX batch comments with an unmatched excerpt no longer silently stack on paragraph 0 (the
+  document title) -- they're now reported as a per-entry error instead.
+- Fixed `read_file` raising `NameError: WD_COLOR_INDEX` on any DOCX containing a highlighted run
+  (missing import) -- this broke reading exactly the kind of "comments in docx" file the failing
+  workflow used.
+- `_docx_split_run_at` no longer deletes inline images/line breaks when splitting a run to anchor
+  a comment to part of its text.
+
+### Fixed -- functions that reported false success
+- `export_to_markdown`, `read_file`, `sql_to_spreadsheet`, `import_from_api`, `import_from_url`,
+  `convert_data`, `add_pivot_table` now return real content inline (bounded, with a link to the
+  full file), not just a download link the calling model can't open.
+- `compare_documents` gained a PDF branch and now errors on unsupported formats instead of
+  silently comparing two empty strings and reporting "0 differences".
+- `document_assembly` now returns the generated documents' links (previously built and then
+  discarded); capped at 200 rows.
+- `add_alt_text` did nothing (`alt_text` isn't a real python-pptx property) and `check_accessibility`
+  crashed reading the same non-existent property on any deck with a picture -- both now use the
+  underlying XML element directly.
+- `version_diff` could never find a version (it globbed a filename pattern that never exists on
+  disk) -- now looks versions up by their real DB record.
+- `add_pivot_table` silently wrote a second run to a sheet named "Pivot2" while still reporting
+  "Pivot"; text-formatted numeric values were coerced to 0.0 in aggregates. Both fixed.
+- `add_slide_transitions` raised `NameError` on every second call to the same file.
+- `tracked_change` and `batch_process` reported success on entries that changed nothing.
+- `generate_document` silently dropped a KPI block or pull quote if it was the last thing in the
+  content, or followed by a blank line.
+- `sql_to_spreadsheet` never committed -- any write statement was silently rolled back.
+- `protect_file`'s xlsx sheet protection was set but never enabled (`protection.sheet` stayed
+  `False`) -- every "protected" sheet opened fully editable.
+- `fill_pdf_form` reported success with 0 fields filled; now returns the requested vs. actual
+  field names when nothing matches.
+- `replace_text` destroyed numbers and dates (substring-tested but whole-value-overwrote
+  non-string cells) and inflated its reported count when a match spanned a DOCX/PPTX formatting
+  boundary (no run actually changed). Both fixed; a cross-run miss is now reported, not hidden.
+- `mail_merge` gained a try/except per row, now scans tables (not just top-level paragraphs),
+  handles cross-run placeholders, stops treating `0`/`False` data values as empty, and is capped
+  at 200 rows.
+
+### Fixed -- crashes on ordinary input
+- `add_content` (`NameError: Pt` on any content with inline code), `_read_docx` (`int()` crash on
+  a `"Heading"` style with no number), `add_watermark`'s PDF branch (invalid PyMuPDF API usage --
+  never worked), `add_data_validation` (crash on its own documented default call), `create_odf`
+  (unreachable `ImportError` handler; `.odp` output produced an empty/broken presentation --
+  rebuilt on real `draw:page` slides), `add_chart` (no format guard, plotted the label column as
+  a data series instead of categories).
+
+### Security
+- `import_from_url`, `import_from_api`, `webhook_trigger` now reject non-http(s) schemes and
+  URLs resolving to loopback/link-local/private-network addresses (blocks `file://` reads and
+  SSRF to internal/cloud-metadata targets).
+- `bulk_folder_ops` rejects a `pattern` containing `..` or a path separator, and double-checks
+  the resolved path stays inside the uploads directory before `delete_old` removes anything.
+
+### Fixed -- other
+- Base64-encoded filenames (an internal storage detail) were never decoded back before being
+  reused in 9 functions, so chained edits grew filenames like `cmVwb3J0Lnhsc3g_edited.xlsx`.
+- CSV values with a leading zero ("02134") or an underscore ("1_000") are kept as text instead of
+  being parsed as a different number.
+- Markdown heading level in `generate_document`/`add_content` used `line.count('#')`, so
+  `"# Bug #42"` became a level-2 heading instead of level-1.
+- Markdown table separator rows using alignment syntax (`|:---|---:|`) rendered as a data row
+  instead of being recognized as a separator.
+- A progress-bar value outside 0-100 no longer produces a negative table-cell width.
+- `read_file` kept only the last table on a PPTX slide with 2+ tables, and returned empty
+  `"headers"` for every page after the first when paging with `row_start > 1`.
+- `update_cells` used `re.match` (matched a prefix) instead of `fullmatch`, so `"A1:B10"` wrote
+  one cell and reported success; missing `"value"` and unknown sheet names are now reported
+  instead of silently mis-handled.
+- `merge_sheets` disambiguates output sheet names that would otherwise collide after 15-char
+  truncation (e.g. two files both truncating to `"Quarterly_Repor"`).
+- `add_named_range` now quotes sheet names containing spaces and produces a fully absolute
+  range (`$A$1:$B$10`), and validates the given name isn't a bare cell reference.
+- `ocr_extract`'s page rendering (`get_pixmap`, ~100-300ms of blocking C code) now runs in the
+  worker thread alongside Tesseract, instead of blocking the event loop before handing off.
+- `_read_file_bytes` now caps input at 200MB instead of buffering an arbitrarily large file.
+- `auto_backup` uses SQLite's own online backup API instead of a plain file copy, which could
+  produce a torn/unrecoverable backup if it landed mid-write on the live database.
+
+### Known remaining issues (not fixed in this pass, lower severity)
+`_read_odf` ignores ODS's `number-columns-repeated` (columns can shift) and numbers ODP slides
+per-paragraph rather than per-slide; `_format_text` collapses newlines within a block and
+over-matches some short acronyms; the timeline/progress-bar detection in `generate_document` can
+still misfire on ordinary prose containing a year or a percentage; `modify_rows`' insert/delete
+does not shift merged-cell ranges, conditional formatting, or formula references; `manage_revisions`
+doesn't scan tables and silently skips paragraphs it can't parse; some OOXML elements are appended
+without strict schema ordering. None of these caused a confirmed live failure; documented here so
+they're tracked rather than lost.
+
 ## [3.15.7] - 2026-08-14
 
 Full audit pass across all 70 functions for the same class of bug as 3.15.6: docstrings that
