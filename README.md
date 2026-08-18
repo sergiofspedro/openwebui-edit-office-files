@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v4.0.2** | Fixed downloaded files 401/404'ing on stock Docker installs (and on S3/GCS/Azure storage) -- `_save_and_link` now uses Open WebUI's own `Storage`/`Files` API instead of guessing a directory from a non-standard env var and writing straight to disk. |
 | **v4.0.1** | Fixes the 5 items left open in v4.0.0: ODS repeated-column/row handling, real per-slide ODP numbering, tighter timeline/progress-bar detection in `generate_document`, merged-cell-range shifting (+ formula-risk warning) in `modify_rows`, and table-scanning in `manage_revisions`. See CHANGELOG for details. |
 | **v4.0.0** | Full bug-fix sweep (~60 fixes): `page_num` is now optional for PDF comments (searches the whole document), new `find_text()`, PDF text now returned inline instead of link-only, plus fixes for false-"success" bugs, crashes, security (SSRF/`file://`/path traversal), and misc. output bugs across the file. See CHANGELOG for the full breakdown. |
 | **v3.15.7** | Full audit pass: 4 real logic bugs fixed (smart_template crash, compliance_check/check_accessibility false-positive pass, convert_data garbage output, add_slide_transitions "random" no-op), 6 missing docstrings added, 24 more docstrings corrected to match real behavior. See CHANGELOG for details. |

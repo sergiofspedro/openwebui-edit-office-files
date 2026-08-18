@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 4.0.1
+version: 4.0.2
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -1102,10 +1102,27 @@ class Tools:
     # Internal: save and return markdown link
     # -----------------------------------------------------------------
     async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None, __user__=None) -> tuple:
-        """Save file to Open WebUI uploads dir, register in DB, return download URL."""
+        """Save file via Open WebUI's own Storage/Files layer and return a working download URL.
+
+        Previously this wrote bytes directly into a locally-computed uploads directory
+        (guessed from a CUSTOM env var, `OPEN_WEBUI_DATA_DIR`, that Open WebUI itself does
+        not use or recognize -- it only "worked" on deployments that happen to set that exact
+        variable) and inserted a row via raw SQL. On any deployment without that variable
+        (i.e. a stock install) the file was written to a path Open WebUI's own file-serving
+        code never looks at, and the returned link 401'd/404'd. It was also silently broken
+        on any S3/GCS/Azure-backed deployment (`STORAGE_PROVIDER` env var), since those
+        require `file.path` to be a Storage URI, not a local filesystem path.
+
+        This now calls the exact same sequence Open WebUI's own upload endpoint uses
+        (`routers/files.py:upload_file_handler`): `Storage.upload_file()` (blocking, so run
+        in a thread) writes the bytes through whatever backend is actually configured, then
+        `Files.insert_new_file()` registers it the same way a real upload would. The
+        resulting `/api/v1/files/{id}/content` link is guaranteed to be servable, on any
+        storage backend, with no environment-variable guessing required.
+        """
         import base64 as _b64
         import hashlib
-        import time as _time
+        import io as _io
         import uuid as _uuid
 
         ext = os.path.splitext(filename)[1].lower()
@@ -1124,57 +1141,40 @@ class Tools:
         content_type = mt.get(ext, "application/octet-stream")
 
         try:
+            import asyncio as _asyncio
+            from open_webui.storage.provider import Storage
+            from open_webui.models.files import Files, FileForm
+
             file_id = str(_uuid.uuid4())
-            with open(os.path.join(_UPLOAD_DIR, file_id), "wb") as f:
-                f.write(file_bytes)
+            user_id = __user__.get("id", "") if __user__ and isinstance(__user__, dict) else ""
 
-            file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
-            now = int(_time.time())
+            tags = {"OpenWebUI-User-Id": user_id, "OpenWebUI-File-Id": file_id}
+            # Storage.upload_file is a blocking call (local disk write, or a network call for
+            # S3/GCS/Azure) -- must run off the event loop, same as the real upload endpoint.
+            contents, file_path = await _asyncio.to_thread(
+                Storage.upload_file, _io.BytesIO(file_bytes), f"{file_id}_{filename}", tags
+            )
+            file_hash = hashlib.sha256(contents).hexdigest()
 
-            # Generate a preview for the data column
-            try:
-                if content_type.startswith("text/") or ext in (".csv", ".md", ".txt"):
-                    preview = file_bytes.decode('utf-8', errors='replace')[:500]
-                elif ext in (".xlsx", ".xls"):
-                    preview = f"[Excel spreadsheet: {len(file_bytes)} bytes]"
-                elif ext in (".docx",):
-                    preview = f"[Word document: {len(file_bytes)} bytes]"
-                elif ext in (".pptx",):
-                    preview = f"[PowerPoint presentation: {len(file_bytes)} bytes]"
-                elif ext in (".pdf",):
-                    preview = f"[PDF document: {len(file_bytes)} bytes]"
-                else:
-                    preview = f"[File: {len(file_bytes)} bytes]"
-            except Exception:
-                preview = "{}"
-
-            conn = sqlite3.connect(_DB_PATH)
-            try:
-                conn.execute(
-                    """INSERT OR REPLACE INTO file
-                       (id, user_id, hash, filename, path, data, meta, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        file_id,
-                        __user__.get("id", "") if __user__ and isinstance(__user__, dict) else "",
-                        file_hash,
-                        _encode_filename(filename),
-                        os.path.join(_UPLOAD_DIR, file_id),
-                        json.dumps({"content_preview": preview}),
-                        json.dumps({
-                            "name": filename,
-                            "content_type": content_type,
-                            "size": len(file_bytes),
-                            "source": "office-plugin",
-                            "generated": True,
-                        }),
-                        now,
-                        now,
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            file_item = await Files.insert_new_file(
+                user_id,
+                FileForm(
+                    id=file_id,
+                    hash=file_hash,
+                    filename=filename,
+                    path=file_path,
+                    data={},
+                    meta={
+                        "name": filename,
+                        "content_type": content_type,
+                        "size": len(contents),
+                        "source": "office-plugin",
+                        "generated": True,
+                    },
+                ),
+            )
+            if file_item is None:
+                raise RuntimeError("Files.insert_new_file returned None")
 
             base_url = self.valves.base_url
             if not base_url and __request__:

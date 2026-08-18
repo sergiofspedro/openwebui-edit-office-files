@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.2] - 2026-08-18
+
+### Fixed
+- **`_save_and_link` no longer depends on `OPEN_WEBUI_DATA_DIR`**, a variable this plugin invented
+  and Open WebUI itself never reads. Reported by a Docker user: files the plugin created were
+  unreachable -- `GET /api/v1/files/{id}/content` returned 401, and the natural next guess,
+  `GET /api/files/{id}` (no `/v1/`), isn't a real endpoint at all (it's silently swallowed by Open
+  WebUI's SPA catch-all, which returns HTTP 200 with the frontend shell, which then renders its
+  own 404 page). Root cause: this plugin wrote bytes straight into a directory it guessed from
+  that custom env var and inserted a raw SQL row, bypassing Open WebUI's own file-serving layer
+  entirely -- worked only on deployments that happened to define that exact variable (which is
+  why it worked in testing but not for a stock install), and was *also* silently broken on any
+  S3/GCS/Azure-backed deployment regardless of the env var, since those require a Storage URI, not
+  a local path.
+  Fixed by calling the same sequence Open WebUI's own upload endpoint uses --
+  `Storage.upload_file()` + `Files.insert_new_file()` -- so every file this plugin creates is
+  indistinguishable, at the API level, from one a user uploaded by hand. No environment variable
+  guessing, works on any storage backend. Verified with a real HTTP request against a running
+  instance (both `Authorization: Bearer` and cookie auth, matching how a clicked markdown link
+  actually authenticates) -- confirmed 200 where it previously 401'd.
+
 ## [4.0.1] - 2026-08-15
 
 Fixes the 5 items v4.0.0 left on its "known remaining issues" list.
