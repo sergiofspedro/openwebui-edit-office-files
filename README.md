@@ -365,6 +365,23 @@ ProxyPreserveHost On
 
 Without this header, download links will use `localhost:3000` and won't work from other machines.
 
+## Troubleshooting: 401, 404, and the `data:` URI Fallback
+
+Three download-link failures all surface as the same visible symptom — the link in chat
+doesn't open a file, or it shows the literal string `data:application/...;base64,...` instead
+of a real URL. They have different causes.
+
+| Symptom in the chat output | HTTP code (if you open the link) | Root cause | Fix |
+|---|---|---|---|
+| `<url>...</url>` rendered as a `data:application/vnd.openxmlformats-...;base64,...` blob | n/a (not a URL) | Save failed and the tool emitted the 1 MB-cap fallback. Either the file was > 1 MB, or the OWUI storage/DB write raised an exception. | Check the OWUI container logs (`docker logs open-webui` or the `webui` service in docker-compose). The tool prints `[office] Save failed: <reason>` to stderr. |
+| `GET <url>...` returns **401 Unauthorized** | 401 | The link was built against a path Open WebUI's own file-serving layer doesn't recognize (e.g. an outdated `file_url_pattern` Valve value, or this plugin's older `OPEN_WEBUI_DATA_DIR` guess). | Upgrade to v4.0.2 or later — the file is now registered through `Storage.upload_file` + `Files.insert_new_file`, the same path the real upload endpoint uses. If you have a custom `file_url_pattern` Valve, it must contain `{file_id}` and start with `/api/v1/files/` (or `/api/files/`) — anything else is rejected at startup. |
+| `GET <url>...` returns **404 / the SPA shell** | 404 (or 200 returning the SPA HTML that then 404s) | The URL is pointing at a path that doesn't exist as an Open WebUI endpoint. Common offenders: `/api/files/{id}` (no `/v1/`, silently caught by the SPA), or a typo in the Valve. | Use the default pattern. If you need a custom one, the value is validated — set `file_url_pattern` to `/api/v1/files/{file_id}/content` (default) or `/api/files/{file_id}` (legacy unauthenticated). |
+
+> The `data:` URI fallback is **not a working download**. It is a 1 MB safety net so a small
+> file isn't lost when the upload path itself fails. The browser will not open it; the chat
+> just shows the raw base64. If you see this, the real fix is to look at the OWUI logs and
+> address the underlying save failure, not to chase the `data:` string.
+
 ## Other Valves
 - `debug_errors` (default `false`) — include the full Python traceback in error responses.
   Leave off for normal use; turn on when debugging a specific failure.

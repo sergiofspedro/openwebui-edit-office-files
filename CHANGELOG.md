@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.3] - 2026-08-27
+
+### Fixed
+- **`_save_and_link` backported to the `src/` subpackage** (`src/tool.py` was still 3.12.0 and
+  re-implemented the broken local-SQL path even though the `tool.py` root entrypoint was fixed in
+  4.0.2). Docker users who install this plugin as a Python package and resolve through
+  `openwebui_edit_office_files.tool:Tools` (the path the package layout picks) get the 4.0.2
+  Storage/Files path; users who resolve through `tool:Tools` directly get the same. No more
+  "installed 4.0.2 but downloads still 401" reports.
+- **`file_url_pattern` Valve is now validated**: a pydantic `field_validator` rejects any value
+  that does not contain the `{file_id}` placeholder or does not start with `/api/v1/files/` (or
+  the legacy `/api/files/`). Previously, a misconfigured Valve would silently produce broken
+  download links -- the user only saw `data:application/...;base64,...` after the file save itself
+  failed, which is the same symptom as a 401 and made the two failures indistinguishable.
+
 ## [4.0.2] - 2026-08-18
 
 ### Fixed

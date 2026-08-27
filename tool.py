@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 4.0.2
+version: 4.0.3
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -18,7 +18,7 @@ import traceback
 from copy import copy
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import base64 as _b64_mod
 
@@ -958,6 +958,29 @@ class Tools:
             default=None,
             description="Custom file download URL pattern. Use {file_id} placeholder. Examples: /api/v1/files/{file_id}/content (default), /api/files/{file_id}. If unset, uses standard Open WebUI URL.",
         )
+
+        @field_validator("file_url_pattern")
+        @classmethod
+        def _validate_file_url_pattern(cls, v):
+            # Allow unset (use the standard /api/v1/files/{id}/content path).
+            if v is None or v == "":
+                return v
+            # Must contain the {file_id} placeholder, otherwise the URL cannot be built.
+            if "{file_id}" not in v:
+                raise ValueError(
+                    "file_url_pattern must contain the '{file_id}' placeholder "
+                    "(e.g. '/api/v1/files/{file_id}/content')."
+                )
+            # Must start with an Open WebUI files endpoint. /api/v1/files/... is the
+            # current, auth-aware endpoint. The legacy /api/files/... is unauthenticated
+            # and serves the file directly, which is not what we want for a generated
+            # download link.
+            if not (v.startswith("/api/v1/files/") or v.startswith("/api/files/")):
+                raise ValueError(
+                    "file_url_pattern must start with '/api/v1/files/' or '/api/files/' "
+                    "(got: %r)." % v
+                )
+            return v
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
         language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
