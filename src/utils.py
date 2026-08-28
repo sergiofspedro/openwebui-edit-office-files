@@ -9,38 +9,41 @@ from typing import Optional
 from .constants import _data_dir, _DB_PATH, _UPLOAD_DIR, _EXPORT_DIR
 
 def _resolve_file_path(file_id: str) -> Optional[str]:
-    """Resolve an Open WebUI file UUID to an absolute disk path."""
-    try:
-        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                "SELECT path FROM file WHERE id = ?", (file_id,)
-            ).fetchone()
-        finally:
-            conn.close()
-    except Exception as exc:
-        print(f"[office] DB lookup failed for {file_id}: {exc}", file=sys.stderr)
-        return None
+    """Resolve an Open WebUI file UUID to an absolute disk path.
 
-    if not row or not row[0]:
-        # Fallback: try by filename
+    Returns None (instead of raising) when the metadata DB is not reachable —
+    e.g. deployments where Open WebUI uses PostgreSQL (or another backend)
+    instead of SQLite, where ``sqlite3.connect(... ?mode=ro)`` raises. Callers
+    treat None as "file not found" and degrade gracefully.
+    """
+    def _lookup(sql: str, params: tuple) -> Optional[str]:
+        """Run a read-only lookup; return the path column or None on failure."""
         try:
             conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
             try:
-                row = conn.execute(
-                    "SELECT path FROM file WHERE filename LIKE ?",
-                    (f"%{file_id}%",),
-                ).fetchone()
+                row = conn.execute(sql, params).fetchone()
+                return row[0] if row else None
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[office] DB lookup failed for {file_id}: {exc}", file=sys.stderr)
+            return None
 
-    if not row or not row[0]:
+    row_path = _lookup(
+        "SELECT path FROM file WHERE id = ?", (file_id,)
+    )
+    if not row_path:
+        # Fallback: try by filename
+        row_path = _lookup(
+            "SELECT path FROM file WHERE filename LIKE ?",
+            (f"%{file_id}%",),
+        )
+
+    if not row_path:
         print(f"[office] No path for file_id {file_id}", file=sys.stderr)
         return None
 
-    path = row[0]
+    path = row_path
     if os.path.isfile(path):
         return path
 

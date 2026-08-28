@@ -8,6 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
+| **v4.0.4** | Two structural fixes: (1) `bulk_folder_ops` can no longer delete other users' files — `delete_old` is now gated by the `allow_bulk_delete` Valve (default OFF), scoped to office-plugin files (`meta LIKE '%office-plugin%'`), with a read-only `preview_delete_old` dry-run; backported to the `src/` subpackage with the path-traversal guard. (2) No more 500 crashes on PostgreSQL-backed Open WebUI — `_resolve_file_path` degrades gracefully to "file not found" when the SQLite URI is rejected, plus a new `database_backend` Valve (`auto`\|`sqlite`\|`postgres`). See CHANGELOG for details. |
 | **v4.0.2** | Fixed downloaded files 401/404'ing on stock Docker installs (and on S3/GCS/Azure storage) -- `_save_and_link` now uses Open WebUI's own `Storage`/`Files` API instead of guessing a directory from a non-standard env var and writing straight to disk. |
 | **v4.0.1** | Fixes the 5 items left open in v4.0.0: ODS repeated-column/row handling, real per-slide ODP numbering, tighter timeline/progress-bar detection in `generate_document`, merged-cell-range shifting (+ formula-risk warning) in `modify_rows`, and table-scanning in `manage_revisions`. See CHANGELOG for details. |
 | **v4.0.0** | Full bug-fix sweep (~60 fixes): `page_num` is now optional for PDF comments (searches the whole document), new `find_text()`, PDF text now returned inline instead of link-only, plus fixes for false-"success" bugs, crashes, security (SSRF/`file://`/path traversal), and misc. output bugs across the file. See CHANGELOG for the full breakdown. |
@@ -365,9 +366,66 @@ ProxyPreserveHost On
 
 Without this header, download links will use `localhost:3000` and won't work from other machines.
 
+## Troubleshooting: 401, 404, and the `data:` URI Fallback
+
+Three download-link failures all surface as the same visible symptom — the link in chat
+doesn't open a file, or it shows the literal string `data:application/...;base64,...` instead
+of a real URL. They have different causes.
+
+| Symptom in the chat output | HTTP code (if you open the link) | Root cause | Fix |
+|---|---|---|---|
+| `<url>...</url>` rendered as a `data:application/vnd.openxmlformats-...;base64,...` blob | n/a (not a URL) | Save failed and the tool emitted the 1 MB-cap fallback. Either the file was > 1 MB, or the OWUI storage/DB write raised an exception. | Check the OWUI container logs (`docker logs open-webui` or the `webui` service in docker-compose). The tool prints `[office] Save failed: <reason>` to stderr. |
+| `GET <url>...` returns **401 Unauthorized** | 401 | The link was built against a path Open WebUI's own file-serving layer doesn't recognize (e.g. an outdated `file_url_pattern` Valve value, or this plugin's older `OPEN_WEBUI_DATA_DIR` guess). | Upgrade to v4.0.2 or later — the file is now registered through `Storage.upload_file` + `Files.insert_new_file`, the same path the real upload endpoint uses. If you have a custom `file_url_pattern` Valve, it must contain `{file_id}` and start with `/api/v1/files/` (or `/api/files/`) — anything else is rejected at startup. |
+| `GET <url>...` returns **404 / the SPA shell** | 404 (or 200 returning the SPA HTML that then 404s) | The URL is pointing at a path that doesn't exist as an Open WebUI endpoint. Common offenders: `/api/files/{id}` (no `/v1/`, silently caught by the SPA), or a typo in the Valve. | Use the default pattern. If you need a custom one, the value is validated — set `file_url_pattern` to `/api/v1/files/{file_id}/content` (default) or `/api/files/{file_id}` (legacy unauthenticated). |
+
+> The `data:` URI fallback is **not a working download**. It is a 1 MB safety net so a small
+> file isn't lost when the upload path itself fails. The browser will not open it; the chat
+> just shows the raw base64. If you see this, the real fix is to look at the OWUI logs and
+> address the underlying save failure, not to chase the `data:` string.
+
+## Troubleshooting: PostgreSQL and bulk deletion (v4.0.4)
+
+### "read_file / edit / write fails with a 500" on a PostgreSQL-backed Open WebUI
+
+This plugin's file resolution reads the Open WebUI metadata DB
+(`webui.db`) directly with SQLite. If your instance uses **PostgreSQL** (or another
+non-SQLite backend), the SQLite driver rejects the read-only `?mode=ro` URI and every
+file operation used to raise a 500.
+
+Since v4.0.4 the DB lookup is wrapped so a failure **degrades gracefully**: the tool
+prints `[office] DB lookup failed for <id>: ...` to the OWUI logs and returns a
+"File not found" response instead of crashing. The **`database_backend`** Valve
+(`auto` | `sqlite` | `postgres`, default `auto`) documents the deployment:
+- leave `auto` to use the environment default (SQLite URI mode is still used when
+  SQLite is detected),
+- set `postgres` when you know the metadata lives in Postgres, so the plugin skips
+  SQLite-specific handling early.
+
+> **Heads-up:** file resolution on non-SQLite backends can only fall back to the
+> filesystem (uploads folder / filename prefix match). For full file-ID resolution
+> on PostgreSQL you would need the file to be present in the uploads directory under
+> its UUID — that is the same behaviour the plugin already relies on for files it
+> creates itself.
+
+### bulk_folder_ops delete_old is disabled / "Bulk delete is disabled"
+
+The **`allow_bulk_delete`** Valve (default `False`) guards both `delete_old` and the
+new read-only `preview_delete_old` operation. This is intentional — `delete_old`
+permanently removes files, and before v4.0.4 it deleted **any** old file in the
+uploads folder, including other users' uploads (issue #10).
+
+- To see what *would* be deleted without deleting anything: enable the Valve, call
+  `bulk_folder_ops(operation="preview_delete_old")`, and inspect the list. It only
+  lists office-plugin files (`meta LIKE '%office-plugin%'`).
+- Only when you are satisfied, call `bulk_folder_ops(operation="delete_old")`. Both
+  operations are scoped to office-plugin files; user uploads are never touched.
+
 ## Other Valves
 - `debug_errors` (default `false`) — include the full Python traceback in error responses.
   Leave off for normal use; turn on when debugging a specific failure.
+- `allow_bulk_delete` (default `false`) — see "bulk deletion" above; must be enabled for
+  `bulk_folder_ops` `delete_old`/`preview_delete_old`.
+- `database_backend` (`auto` | `sqlite` | `postgres`, default `auto`) — see "PostgreSQL" above.
 - `templates` / `cleanup_schedule` / `language` — see `save_template`/`schedule_cleanup`/
   `translate_errors` above.
 

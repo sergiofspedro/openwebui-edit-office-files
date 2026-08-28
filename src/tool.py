@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported.
-version: 3.12.0
+version: 4.0.4
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy
 """
 
@@ -18,7 +18,7 @@ import traceback
 from copy import copy
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 from .constants import *
@@ -36,9 +36,40 @@ class Tools:
             default=None,
             description="Custom file download URL pattern. Use {file_id} placeholder. Examples: /api/v1/files/{file_id}/content (default), /api/files/{file_id}. If unset, uses standard Open WebUI URL.",
         )
+
+        @field_validator("file_url_pattern")
+        @classmethod
+        def _validate_file_url_pattern(cls, v):
+            # Allow unset (use the standard /api/v1/files/{id}/content path).
+            if v is None or v == "":
+                return v
+            # Must contain the {file_id} placeholder, otherwise the URL cannot be built.
+            if "{file_id}" not in v:
+                raise ValueError(
+                    "file_url_pattern must contain the '{file_id}' placeholder "
+                    "(e.g. '/api/v1/files/{file_id}/content')."
+                )
+            # Must start with an Open WebUI files endpoint. /api/v1/files/... is the
+            # current, auth-aware endpoint. The legacy /api/files/... is unauthenticated
+            # and serves the file directly, which is not what we want for a generated
+            # download link.
+            if not (v.startswith("/api/v1/files/") or v.startswith("/api/files/")):
+                raise ValueError(
+                    "file_url_pattern must start with '/api/v1/files/' or '/api/files/' "
+                    "(got: %r)." % v
+                )
+            return v
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
         language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
+        allow_bulk_delete: bool = Field(
+            default=False,
+            description="Enable permanent deletion of office-plugin files via bulk_folder_ops delete_old. Default OFF — set to True only after confirming the scope filter (meta LIKE '%office-plugin%') matches your expectations. v4.0.4 (#10)."
+        )
+        database_backend: str = Field(
+            default="auto",
+            description="Metadata DB backend hint: 'auto' (use environment / auto-detect), 'sqlite' (force read-only URI mode), 'postgres' (skip SQLite URI, rely on filesystem fallbacks). Read-only paths still use ?mode=ro when sqlite. v4.0.4 (#12)."
+        )
         pass
 
     def __init__(self):
@@ -59,10 +90,27 @@ class Tools:
 
 
     async def _save_and_link(self, file_bytes: bytes, filename: str, __request__=None, __user__=None) -> tuple:
-        """Save file to Open WebUI uploads dir, register in DB, return download URL."""
+        """Save file via Open WebUI's own Storage/Files layer and return a working download URL.
+
+        Previously this wrote bytes directly into a locally-computed uploads directory
+        (guessed from a CUSTOM env var, `OPEN_WEBUI_DATA_DIR`, that Open WebUI itself does
+        not use or recognize -- it only "worked" on deployments that happen to set that exact
+        variable) and inserted a row via raw SQL. On any deployment without that variable
+        (i.e. a stock install) the file was written to a path Open WebUI's own file-serving
+        code never looks at, and the returned link 401'd/404'd. It was also silently broken
+        on any S3/GCS/Azure-backed deployment (`STORAGE_PROVIDER` env var), since those
+        require `file.path` to be a Storage URI, not a local filesystem path.
+
+        This now calls the exact same sequence Open WebUI's own upload endpoint uses
+        (`routers/files.py:upload_file_handler`): `Storage.upload_file()` (blocking, so run
+        in a thread) writes the bytes through whatever backend is actually configured, then
+        `Files.insert_new_file()` registers it the same way a real upload would. The
+        resulting `/api/v1/files/{id}/content` link is guaranteed to be servable, on any
+        storage backend, with no environment-variable guessing required.
+        """
         import base64 as _b64
         import hashlib
-        import time as _time
+        import io as _io
         import uuid as _uuid
 
         ext = os.path.splitext(filename)[1].lower()
@@ -81,57 +129,40 @@ class Tools:
         content_type = mt.get(ext, "application/octet-stream")
 
         try:
+            import asyncio as _asyncio
+            from open_webui.storage.provider import Storage
+            from open_webui.models.files import Files, FileForm
+
             file_id = str(_uuid.uuid4())
-            with open(os.path.join(_UPLOAD_DIR, file_id), "wb") as f:
-                f.write(file_bytes)
+            user_id = __user__.get("id", "") if __user__ and isinstance(__user__, dict) else ""
 
-            file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
-            now = int(_time.time())
+            tags = {"OpenWebUI-User-Id": user_id, "OpenWebUI-File-Id": file_id}
+            # Storage.upload_file is a blocking call (local disk write, or a network call for
+            # S3/GCS/Azure) -- must run off the event loop, same as the real upload endpoint.
+            contents, file_path = await _asyncio.to_thread(
+                Storage.upload_file, _io.BytesIO(file_bytes), f"{file_id}_{filename}", tags
+            )
+            file_hash = hashlib.sha256(contents).hexdigest()
 
-            # Generate a preview for the data column
-            try:
-                if content_type.startswith("text/") or ext in (".csv", ".md", ".txt"):
-                    preview = file_bytes.decode('utf-8', errors='replace')[:500]
-                elif ext in (".xlsx", ".xls"):
-                    preview = f"[Excel spreadsheet: {len(file_bytes)} bytes]"
-                elif ext in (".docx",):
-                    preview = f"[Word document: {len(file_bytes)} bytes]"
-                elif ext in (".pptx",):
-                    preview = f"[PowerPoint presentation: {len(file_bytes)} bytes]"
-                elif ext in (".pdf",):
-                    preview = f"[PDF document: {len(file_bytes)} bytes]"
-                else:
-                    preview = f"[File: {len(file_bytes)} bytes]"
-            except Exception:
-                preview = "{}"
-
-            conn = sqlite3.connect(_DB_PATH)
-            try:
-                conn.execute(
-                    """INSERT OR REPLACE INTO file
-                       (id, user_id, hash, filename, path, data, meta, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        file_id,
-                        __user__.get("id", "") if __user__ and isinstance(__user__, dict) else "",
-                        file_hash,
-                        _encode_filename(filename),
-                        os.path.join(_UPLOAD_DIR, file_id),
-                        preview,
-                        json.dumps({
-                            "name": filename,
-                            "content_type": content_type,
-                            "size": len(file_bytes),
-                            "source": "office-plugin",
-                            "generated": True,
-                        }),
-                        now,
-                        now,
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            file_item = await Files.insert_new_file(
+                user_id,
+                FileForm(
+                    id=file_id,
+                    hash=file_hash,
+                    filename=filename,
+                    path=file_path,
+                    data={},
+                    meta={
+                        "name": filename,
+                        "content_type": content_type,
+                        "size": len(contents),
+                        "source": "office-plugin",
+                        "generated": True,
+                    },
+                ),
+            )
+            if file_item is None:
+                raise RuntimeError("Files.insert_new_file returned None")
 
             base_url = self.valves.base_url
             if not base_url and __request__:
@@ -467,9 +498,23 @@ class Tools:
 
     # --- v3.4.0: Speaker Notes ---
     async def bulk_folder_ops(self, operation: str = "list", pattern: str = "*", __user__=None, __request__=None) -> str:
-        """Apply an operation to all files in the uploads folder. Operations: list, delete_old, stats."""
+        """Apply an operation to all files in the uploads folder. Operations:
+        list, delete_old, preview_delete_old, stats.
+
+        v4.0.4 (#10): delete_old and preview_delete_old are gated by the
+        ``allow_bulk_delete`` Valve (default OFF) and scoped to office-plugin
+        files via ``meta LIKE '%office-plugin%'`` — the same scope as
+        cleanup_files. Path traversal is rejected up-front.
+        """
         import glob as _glob, time as _time
         uploads = _UPLOAD_DIR
+        # Reject patterns that would walk outside the uploads directory. Same
+        # rationale as the root tool.py copy: caller-supplied, fed into glob(),
+        # can otherwise escape via ".." or a separator and PERMANENTLY delete
+        # arbitrary host files. (#10)
+        if ".." in pattern or "/" in pattern or "\\" in pattern or os.path.isabs(pattern):
+            return json.dumps({"error": "Invalid pattern -- must be a simple glob within the uploads folder (no '..', '/', or '\\\\')."})
+        uploads_real = os.path.realpath(uploads)
         if operation == "list":
             files = sorted(_glob.glob(os.path.join(uploads, pattern)))
             if not files: return "No files found matching: " + str(pattern)
@@ -480,18 +525,64 @@ class Tools:
                 result += "- " + os.path.basename(f) + " (" + str(round(size/1024,1)) + " KB, " + str(mtime) + ")\n"
             if len(files) > 50: result += "... and " + str(len(files)-50) + " more"
             return result
-        elif operation == "delete_old":
-            cutoff = _time.time() - (30 * 86400)
-            deleted = 0
-            for f in _glob.glob(os.path.join(uploads, pattern)):
-                if os.path.getmtime(f) < cutoff:
-                    os.remove(f); deleted += 1
-            return "Deleted " + str(deleted) + " files older than 30 days."
+        elif operation in ("delete_old", "preview_delete_old"):
+            if not getattr(self.valves, "allow_bulk_delete", False):
+                return json.dumps({"error": "Bulk delete is disabled. Set the 'allow_bulk_delete' Valve to True in the tool's settings to use delete_old or preview_delete_old. v4.0.4 (#10)."})
+            cutoff = int(_time.time()) - (30 * 86400)
+            # Scoped to office-plugin files via the DB's meta column — the same
+            # scope cleanup_files uses. Never walks the filesystem to decide
+            # what to delete, so user uploads outside the plugin are safe. (#10)
+            try:
+                _conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+                try:
+                    rows = _conn.execute(
+                        "SELECT id, filename, created_at FROM file WHERE meta LIKE '%office-plugin%' AND created_at < ?",
+                        (cutoff,),
+                    ).fetchall()
+                finally:
+                    _conn.close()
+            except Exception as exc:
+                return json.dumps({"error": f"Could not query office-plugin file index: {exc}. v4.0.4 (#10)."})
+            if not rows:
+                return "No office-plugin files older than 30 days found."
+            if operation == "preview_delete_old":
+                out = "**Preview: " + str(len(rows)) + " office-plugin file(s) would be deleted:**\n"
+                for r in rows[:50]:
+                    out += "- " + str(r[1]) + " (id=" + str(r[0]) + ")\n"
+                if len(rows) > 50: out += "... and " + str(len(rows) - 50) + " more"
+                return out
+            # delete_old: actually remove the on-disk file AND the DB row.
+            deleted, errors = [], []
+            try:
+                _wconn = sqlite3.connect(_DB_PATH)
+                try:
+                    for r in rows:
+                        fpath = os.path.join(_UPLOAD_DIR, r[0])
+                        try:
+                            # Belt-and-suspenders: confirm path stays inside uploads.
+                            if not os.path.realpath(fpath).startswith(uploads_real + os.sep):
+                                errors.append(r[1] + ": refused (path outside uploads)")
+                                continue
+                            if os.path.exists(fpath):
+                                os.remove(fpath)
+                            _wconn.execute("DELETE FROM file WHERE id = ?", (r[0],))
+                            deleted.append(r[1])
+                        except Exception as e:
+                            errors.append(str(r[1]) + ": " + str(e))
+                    _wconn.commit()
+                finally:
+                    _wconn.close()
+            except Exception as exc:
+                return json.dumps({"error": f"Delete failed: {exc}. v4.0.4 (#10)."})
+            result = "Deleted " + str(len(deleted)) + " office-plugin file(s) older than 30 days."
+            if errors:
+                result += "\nErrors (" + str(len(errors)) + "):\n" + "\n".join("- " + e for e in errors)
+            return result
         elif operation == "stats":
             files = _glob.glob(os.path.join(uploads, pattern))
             total_size = sum(os.path.getsize(f) for f in files)
             return "**Uploads Stats:**\n- Files: " + str(len(files)) + "\n- Total size: " + str(round(total_size/1024/1024,1)) + " MB"
-        return json.dumps({"error": "Unknown operation: " + str(operation) + ". Use: list, delete_old, stats"})
+        return json.dumps({"error": "Unknown operation: " + str(operation) + ". Use: list, delete_old, preview_delete_old, stats"})
 
     # --- v3.4.0: File Search ---
     async def file_search(self, query: str, file_type: str = "all") -> str:

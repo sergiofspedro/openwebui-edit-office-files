@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.4] - 2026-08-28
+
+### Fixed
+
+- **`bulk_folder_ops` could delete other users' files** (issue #10): `delete_old` previously
+  walked the filesystem and removed *any* file in the uploads folder older than 30 days, regardless
+  of who uploaded it. It is now:
+  - gated behind a new **`allow_bulk_delete`** Valve (default `False`) — without it, both
+    `delete_old` and `preview_delete_old` return an error;
+  - scoped to office-plugin files via `meta LIKE '%office-plugin%'` (the same scope
+    `cleanup_files` uses), so user uploads are never touched;
+  - dry-run first: **`preview_delete_old`** lists exactly which files *would* be deleted
+    (read-only, safe even when the Valve is off, as long as the caller enables it).
+  - Backported to `src/tool.py` (the packaged subpackage), which also gained the path-traversal
+    guard that the root `tool.py` already had.
+- **Crash when the metadata DB is not SQLite** (issue #12): `_resolve_file_path` in both
+  `tool.py` and `src/utils.py` called `sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)`
+  unconditionally; on PostgreSQL deployments the driver rejects the `?mode=ro` URI and every
+  file read/editing operation raised a 500. The DB lookup is now wrapped so any failure
+  (Postgres, missing file, permissions) returns `None` and callers degrade gracefully instead
+  of raising. Read-only paths still use `?mode=ro` when SQLite is detected.
+
+### Added
+
+- **`database_backend`** Valve (string: `auto` | `sqlite` | `postgres`, default `auto`) on both
+  `tool.py` and `src/tool.py` — a diagnostic hint that lets deployments that do not use SQLite
+  document/force the backend; SQLite-specific URI handling is skipped for non-SQLite backends.
+
+## [4.0.3] - 2026-08-27
+
+### Fixed
+- **`_save_and_link` backported to the `src/` subpackage** (`src/tool.py` was still 3.12.0 and
+  re-implemented the broken local-SQL path even though the `tool.py` root entrypoint was fixed in
+  4.0.2). Docker users who install this plugin as a Python package and resolve through
+  `openwebui_edit_office_files.tool:Tools` (the path the package layout picks) get the 4.0.2
+  Storage/Files path; users who resolve through `tool:Tools` directly get the same. No more
+  "installed 4.0.2 but downloads still 401" reports.
+- **`file_url_pattern` Valve is now validated**: a pydantic `field_validator` rejects any value
+  that does not contain the `{file_id}` placeholder or does not start with `/api/v1/files/` (or
+  the legacy `/api/files/`). Previously, a misconfigured Valve would silently produce broken
+  download links -- the user only saw `data:application/...;base64,...` after the file save itself
+  failed, which is the same symptom as a 401 and made the two failures indistinguishable.
+
 ## [4.0.2] - 2026-08-18
 
 ### Fixed
