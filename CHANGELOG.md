@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.4] - 2026-08-28
+
+### Fixed
+
+- **`bulk_folder_ops` could delete other users' files** (issue #10): `delete_old` previously
+  walked the filesystem and removed *any* file in the uploads folder older than 30 days, regardless
+  of who uploaded it. It is now:
+  - gated behind a new **`allow_bulk_delete`** Valve (default `False`) — without it, both
+    `delete_old` and `preview_delete_old` return an error;
+  - scoped to office-plugin files via `meta LIKE '%office-plugin%'` (the same scope
+    `cleanup_files` uses), so user uploads are never touched;
+  - dry-run first: **`preview_delete_old`** lists exactly which files *would* be deleted
+    (read-only, safe even when the Valve is off, as long as the caller enables it).
+  - Backported to `src/tool.py` (the packaged subpackage), which also gained the path-traversal
+    guard that the root `tool.py` already had.
+- **Crash when the metadata DB is not SQLite** (issue #12): `_resolve_file_path` in both
+  `tool.py` and `src/utils.py` called `sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)`
+  unconditionally; on PostgreSQL deployments the driver rejects the `?mode=ro` URI and every
+  file read/editing operation raised a 500. The DB lookup is now wrapped so any failure
+  (Postgres, missing file, permissions) returns `None` and callers degrade gracefully instead
+  of raising. Read-only paths still use `?mode=ro` when SQLite is detected.
+
+### Added
+
+- **`database_backend`** Valve (string: `auto` | `sqlite` | `postgres`, default `auto`) on both
+  `tool.py` and `src/tool.py` — a diagnostic hint that lets deployments that do not use SQLite
+  document/force the backend; SQLite-specific URI handling is skipped for non-SQLite backends.
+
 ## [4.0.3] - 2026-08-27
 
 ### Fixed

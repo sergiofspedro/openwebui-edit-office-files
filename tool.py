@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 4.0.3
+version: 4.0.4
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -128,38 +128,40 @@ __all__ = [
 ]
 
 def _resolve_file_path(file_id: str) -> Optional[str]:
-    """Resolve an Open WebUI file UUID to an absolute disk path."""
-    try:
-        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                "SELECT path FROM file WHERE id = ?", (file_id,)
-            ).fetchone()
-        finally:
-            conn.close()
-    except Exception as exc:
-        print(f"[office] DB lookup failed for {file_id}: {exc}", file=sys.stderr)
-        return None
+    """Resolve an Open WebUI file UUID to an absolute disk path.
 
-    if not row or not row[0]:
-        # Fallback: try by filename
+    v4.0.4 (#12): returns None (instead of raising) when the metadata DB is
+    not SQLite — e.g. PostgreSQL deployments where ``?mode=ro`` is rejected.
+    Callers treat None as "file not found" and degrade gracefully.
+    """
+    def _lookup(sql: str, params: tuple) -> Optional[str]:
+        """Run a read-only lookup; return the path column or None on failure."""
         try:
             conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
             try:
-                row = conn.execute(
-                    "SELECT path FROM file WHERE filename LIKE ?",
-                    (f"%{file_id}%",),
-                ).fetchone()
+                row = conn.execute(sql, params).fetchone()
+                return row[0] if row else None
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[office] DB lookup failed for {file_id}: {exc}", file=sys.stderr)
+            return None
 
-    if not row or not row[0]:
+    row_path = _lookup(
+        "SELECT path FROM file WHERE id = ?", (file_id,)
+    )
+    if not row_path:
+        # Fallback: try by filename
+        row_path = _lookup(
+            "SELECT path FROM file WHERE filename LIKE ?",
+            (f"%{file_id}%",),
+        )
+
+    if not row_path:
         print(f"[office] No path for file_id {file_id}", file=sys.stderr)
         return None
 
-    path = row[0]
+    path = row_path
     if os.path.isfile(path):
         return path
 
@@ -984,6 +986,14 @@ class Tools:
         templates: Optional[str] = Field(default="{}", description="JSON map of template names to content strings.")
         cleanup_schedule: Optional[str] = Field(default="{}", description="JSON schedule for auto-cleanup.")
         language: Optional[str] = Field(default="en", description="Language for error messages: en, pt, es, fr, de.")
+        allow_bulk_delete: bool = Field(
+            default=False,
+            description="Enable permanent deletion of office-plugin files via bulk_folder_ops delete_old. Default OFF — set to True only after confirming the scope filter (meta LIKE '%office-plugin%') matches your expectations. v4.0.4 (#10)."
+        )
+        database_backend: str = Field(
+            default="auto",
+            description="Metadata DB backend hint: 'auto' (use environment / auto-detect), 'sqlite' (force read-only URI mode), 'postgres' (skip SQLite URI, rely on filesystem fallbacks). Read-only paths still use ?mode=ro when sqlite. v4.0.4 (#12)."
+        )
         pass
 
     def __init__(self):
@@ -5118,9 +5128,14 @@ class Tools:
 
     # --- v3.4.0: Bulk Folder Ops ---
     async def bulk_folder_ops(self, operation: str = "list", pattern: str = "*", __user__=None, __request__=None) -> str:
-        """Apply an operation to all files in the uploads folder. Operations: list, delete_old
-        (PERMANENT, irreversible deletion of every file matching `pattern` whose modified time
-        is older than a fixed 30 days -- not configurable, no confirmation step), stats."""
+        """Apply an operation to all files in the uploads folder. Operations:
+        list, delete_old, preview_delete_old, stats.
+
+        v4.0.4 (#10): delete_old and preview_delete_old are gated by the
+        ``allow_bulk_delete`` Valve (default OFF) and scoped to office-plugin
+        files via ``meta LIKE '%office-plugin%'`` — the same scope as
+        cleanup_files. Path traversal is rejected up-front.
+        """
         import glob as _glob, time as _time
         uploads = _UPLOAD_DIR
         # `pattern` is caller-supplied and fed straight into glob() -- ".."  or a path
@@ -5141,22 +5156,64 @@ class Tools:
                 result += "- " + os.path.basename(f) + " (" + str(round(size/1024,1)) + " KB, " + str(mtime) + ")\n"
             if len(files) > 50: result += "... and " + str(len(files)-50) + " more"
             return result
-        elif operation == "delete_old":
-            cutoff = _time.time() - (30 * 86400)
-            deleted = 0
-            for f in _glob.glob(os.path.join(uploads, pattern)):
-                # Belt-and-suspenders: even with the pattern check above, confirm the
-                # resolved path is still inside the uploads directory before removing it.
-                if not os.path.realpath(f).startswith(uploads_real + os.sep):
-                    continue
-                if os.path.getmtime(f) < cutoff:
-                    os.remove(f); deleted += 1
-            return "Deleted " + str(deleted) + " files older than 30 days."
+        elif operation in ("delete_old", "preview_delete_old"):
+            if not getattr(self.valves, "allow_bulk_delete", False):
+                return json.dumps({"error": "Bulk delete is disabled. Set the 'allow_bulk_delete' Valve to True in the tool's settings to use delete_old or preview_delete_old. v4.0.4 (#10)."})
+            cutoff = int(_time.time()) - (30 * 86400)
+            # Scoped to office-plugin files via the DB's meta column — the same
+            # scope cleanup_files uses. Never walks the filesystem to decide
+            # what to delete, so user uploads outside the plugin are safe. (#10)
+            try:
+                _conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+                try:
+                    rows = _conn.execute(
+                        "SELECT id, filename, created_at FROM file WHERE meta LIKE '%office-plugin%' AND created_at < ?",
+                        (cutoff,),
+                    ).fetchall()
+                finally:
+                    _conn.close()
+            except Exception as exc:
+                return json.dumps({"error": f"Could not query office-plugin file index: {exc}. v4.0.4 (#10)."})
+            if not rows:
+                return "No office-plugin files older than 30 days found."
+            if operation == "preview_delete_old":
+                out = "**Preview: " + str(len(rows)) + " office-plugin file(s) would be deleted:**\n"
+                for r in rows[:50]:
+                    out += "- " + str(r[1]) + " (id=" + str(r[0]) + ")\n"
+                if len(rows) > 50: out += "... and " + str(len(rows) - 50) + " more"
+                return out
+            # delete_old: actually remove the on-disk file AND the DB row.
+            deleted, errors = [], []
+            try:
+                _wconn = sqlite3.connect(_DB_PATH)
+                try:
+                    for r in rows:
+                        fpath = os.path.join(_UPLOAD_DIR, r[0])
+                        try:
+                            # Belt-and-suspenders: confirm path stays inside uploads.
+                            if not os.path.realpath(fpath).startswith(uploads_real + os.sep):
+                                errors.append(r[1] + ": refused (path outside uploads)")
+                                continue
+                            if os.path.exists(fpath):
+                                os.remove(fpath)
+                            _wconn.execute("DELETE FROM file WHERE id = ?", (r[0],))
+                            deleted.append(r[1])
+                        except Exception as e:
+                            errors.append(str(r[1]) + ": " + str(e))
+                    _wconn.commit()
+                finally:
+                    _wconn.close()
+            except Exception as exc:
+                return json.dumps({"error": f"Delete failed: {exc}. v4.0.4 (#10)."})
+            result = "Deleted " + str(len(deleted)) + " office-plugin file(s) older than 30 days."
+            if errors:
+                result += "\nErrors (" + str(len(errors)) + "):\n" + "\n".join("- " + e for e in errors)
+            return result
         elif operation == "stats":
             files = _glob.glob(os.path.join(uploads, pattern))
             total_size = sum(os.path.getsize(f) for f in files)
             return "**Uploads Stats:**\n- Files: " + str(len(files)) + "\n- Total size: " + str(round(total_size/1024/1024,1)) + " MB"
-        return json.dumps({"error": "Unknown operation: " + str(operation) + ". Use: list, delete_old, stats"})
+        return json.dumps({"error": "Unknown operation: " + str(operation) + ". Use: list, delete_old, preview_delete_old, stats"})
 
     # --- v3.4.0: File Search ---
     async def file_search(self, query: str, file_type: str = "all") -> str:
