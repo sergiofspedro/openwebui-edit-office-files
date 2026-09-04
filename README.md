@@ -8,7 +8,7 @@ Create, read, edit and export Office files (.docx, .xlsx, .xls, .pptx, .odt, .od
 
 | Version | Feature |
 |---|---|
-| **v4.0.4fix-1** | Fixes two bugs reported against v4.0.4 on stock Docker installs: (1) `No path for file_id <uuid>` / `unable to open database file` is gone — `_get_owui_data_dir()` now consults upstream `DATA_DIR` (and `/app/backend/data`) before falling back to the legacy `OPEN_WEBUI_DATA_DIR` env var. (2) `add_comment` no longer crashes with `ParseError: bad input at 1:0` when an OPC part is empty or non-UTF-8 — a new `_safe_etree_fromstring` helper handles all encoding and empty-blob cases gracefully. Drop-in replacement for v4.0.4, no config changes required. |
+| **v4.0.5** | Fixes two bugs reported against v4.0.4 on stock Docker installs: (1) `No path for file_id <uuid>` / `unable to open database file` is gone — `_get_owui_data_dir()` now consults upstream `DATA_DIR` (and `/app/backend/data`) before falling back to the legacy `OPEN_WEBUI_DATA_DIR` env var. (2) `add_comment` no longer crashes with `ParseError: bad input at 1:0` when an OPC part is empty or non-UTF-8 — a new `_safe_etree_fromstring` helper handles all encoding and empty-blob cases gracefully. Drop-in replacement for v4.0.4, no config changes required. |
 | **v4.0.4** | Two structural fixes: (1) `bulk_folder_ops` can no longer delete other users' files — `delete_old` is now gated by the `allow_bulk_delete` Valve (default OFF), scoped to office-plugin files (`meta LIKE '%office-plugin%'`), with a read-only `preview_delete_old` dry-run; backported to the `src/` subpackage with the path-traversal guard. (2) No more 500 crashes on PostgreSQL-backed Open WebUI — `_resolve_file_path` degrades gracefully to "file not found" when the SQLite URI is rejected, plus a new `database_backend` Valve (`auto`\|`sqlite`\|`postgres`). See CHANGELOG for details. |
 | **v4.0.2** | Fixed downloaded files 401/404'ing on stock Docker installs (and on S3/GCS/Azure storage) -- `_save_and_link` now uses Open WebUI's own `Storage`/`Files` API instead of guessing a directory from a non-standard env var and writing straight to disk. |
 | **v4.0.1** | Fixes the 5 items left open in v4.0.0: ODS repeated-column/row handling, real per-slide ODP numbering, tighter timeline/progress-bar detection in `generate_document`, merged-cell-range shifting (+ formula-risk warning) in `modify_rows`, and table-scanning in `manage_revisions`. See CHANGELOG for details. |
@@ -284,7 +284,7 @@ mirror (same content, updated in the same commit) for tooling that expects a `sr
 it is not a separate build artifact and there is no build step.
 
 ### Upgrading
-**v4.0.4fix-1 is a drop-in replacement for v4.0.4 — no config changes required.** Just
+**v4.0.5 is a drop-in replacement for v4.0.4 — no config changes required.** Just
 re-save the tool in Open WebUI (Workspace > Tools > Edit > Save) and restart any active
 chats. No env vars, no Valve changes, no DB migration.
 
@@ -389,7 +389,7 @@ of a real URL. They have different causes.
 > just shows the raw base64. If you see this, the real fix is to look at the OWUI logs and
 > address the underlying save failure, not to chase the `data:` string.
 
-## Troubleshooting: `No path for file_id <uuid>` on stock Docker (v4.0.4fix-1)
+## Troubleshooting: `No path for file_id <uuid>` on stock Docker (v4.0.5)
 
 Every file lookup returns `No path for file_id <uuid>`, `auto_backup` fails with
 `unable to open database file`, and `tool_stats` reports 0 tools. On a stock
@@ -398,7 +398,7 @@ Open WebUI Docker image this was caused by v4.0.4 only consulting the legacy
 instead of the canonical upstream `DATA_DIR` (`open_webui/env.py:222`,
 default `/app/backend/data`).
 
-Since v4.0.4fix-1, the data-dir resolution chain is
+Since v4.0.5, the data-dir resolution chain is
 `DATA_DIR → OPEN_WEBUI_DATA_DIR (legacy) → /app/backend/data → /data → userspace`,
 so stock Docker installs are resolved automatically with no configuration. If
 you still see this error after upgrading, set `DATA_DIR=/app/backend/data`

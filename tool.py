@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 4.0.4fix-1
+version: 4.0.5
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -63,7 +63,7 @@ def _candidate_owui_data_dirs() -> list[str]:
     Only directories that *might* exist are returned. The first one that exists
     (and contains webui.db, or is writable) is used by the callers.
 
-    v4.0.4fix-1: added ``DATA_DIR`` (canonical upstream Open WebUI env var,
+    v4.0.5 (formerly v4.0.4fix-1): added ``DATA_DIR`` (canonical upstream Open WebUI env var,
     defined in ``open_webui/env.py:222``) and the Docker default
     (``/app/backend/data``) to the resolution chain. The legacy
     ``OPEN_WEBUI_DATA_DIR`` plugin-only env var is kept for backward
@@ -1294,7 +1294,7 @@ class Tools:
         on any S3/GCS/Azure-backed deployment (`STORAGE_PROVIDER` env var), since those
         require `file.path` to be a Storage URI, not a local filesystem path.
 
-        v4.0.4fix-1: the data-dir resolution chain (`_candidate_owui_data_dirs`) now also
+        v4.0.5 (formerly v4.0.4fix-1): the data-dir resolution chain (`_candidate_owui_data_dirs`) now also
         consults upstream `DATA_DIR` (canonical, `open_webui/env.py:222`, default
         `/app/backend/data`) before falling back to the legacy `OPEN_WEBUI_DATA_DIR`
         env var and the OS-specific userspace path. This fixes the
