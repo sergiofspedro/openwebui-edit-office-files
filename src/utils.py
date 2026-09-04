@@ -8,6 +8,95 @@ import base64 as _b64_mod
 from typing import Optional
 from .constants import _data_dir, _DB_PATH, _UPLOAD_DIR, _EXPORT_DIR
 
+
+def _safe_etree_fromstring(blob, context: str = "<unknown>"):
+    """Parse an XML blob defensively, returning ``None`` on any failure.
+
+    Replaces bare ``lxml.etree.fromstring(blob)`` calls that previously raised
+    ``lxml.etree.XMLSyntaxError: Document is empty`` or the cryptic
+    ``ParseError: bad input at 1:0`` whenever an OPC part inside a PPTX is
+    empty, BOM-prefixed, or in a non-UTF-8 encoding (e.g. UTF-16 from a
+    third-party authoring tool, or bytes that lxml cannot sniff).
+
+    Resolution order:
+        1. ``None``/empty input -> ``None`` (with stderr note).
+        2. Already a parsed element -> return as-is.
+        3. ``bytes`` → try ``utf-8`` first, then ``utf-8-sig``, then
+           ``cp1252``/``latin-1`` (latin-1 always succeeds, masking
+           unrecoverable input as ``None`` if lxml still rejects it).
+        4. ``str`` passed directly to ``lxml.etree.fromstring``.
+
+    On any failure path the function logs a single ``[office]`` line to stderr
+    and returns ``None``. Callers are expected to handle ``None`` as "this
+    part is missing or unrecoverable" and proceed.
+    """
+    if blob is None:
+        print(f"[office] Empty XML blob in {context}", file=sys.stderr)
+        return None
+
+    # If lxml already returned an Element (some upstream helpers do), pass it through.
+    try:
+        from lxml import etree as _et
+        if hasattr(blob, "tag") and hasattr(blob, "get"):
+            return blob
+    except Exception:
+        pass
+
+    raw = blob
+    # Normalize bytes → str with a tolerant decoder cascade.
+    if isinstance(raw, (bytes, bytearray)):
+        if len(raw) == 0:
+            print(f"[office] Empty XML blob in {context}", file=sys.stderr)
+            return None
+        # Try UTF-8 first (canonical for OPC packages), then UTF-16 (some
+        # third-party Office tools emit UTF-16 inside the ZIP), then latin-1
+        # as a last-resort fallback. latin-1 always decodes, so any failure
+        # past this point is an XML syntax error.
+        last_exc: Exception | None = None
+        for enc in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
+            try:
+                decoded = raw.decode(enc)
+            except Exception:
+                continue
+            try:
+                from lxml import etree as _et
+                # Pass bytes through directly so lxml auto-detects the BOM
+                # and encoding declaration rather than getting confused by our
+                # own re-encoding.
+                return _et.fromstring(decoded.encode("utf-8") if enc != "utf-16" else raw)
+            except Exception as exc:
+                # Save the last exception for logging, but try the next encoding.
+                last_exc = exc
+                continue
+        # All decodings produced something but lxml rejected every form.
+        print(
+            f"[office] Parse failed in {context}: {last_exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    if isinstance(raw, str):
+        if not raw.strip():
+            print(f"[office] Empty XML blob in {context}", file=sys.stderr)
+            return None
+        try:
+            from lxml import etree as _et
+            return _et.fromstring(raw)
+        except Exception as exc:
+            print(
+                f"[office] Parse failed in {context}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+    # Unknown type — bail out cleanly.
+    print(
+        f"[office] Unsupported blob type {type(raw).__name__} in {context}",
+        file=sys.stderr,
+    )
+    return None
+
+
 def _resolve_file_path(file_id: str) -> Optional[str]:
     """Resolve an Open WebUI file UUID to an absolute disk path.
 

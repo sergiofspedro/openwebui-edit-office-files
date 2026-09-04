@@ -293,7 +293,10 @@ async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", p
 
             # --- modern comment part: compute next comment idx ---
             if modern_name in entries:
-                mroot = etree.fromstring(entries[modern_name])
+                mroot = _safe_etree_fromstring(entries[modern_name], context=modern_name)
+                if mroot is None:
+                    # Could not parse existing modern comments — start fresh
+                    mroot = etree.Element("{%s}cmLst" % _P_NS)
                 max_idx = 0
                 for el in mroot:
                     if el.tag == "{%s}cm" % _P_NS:
@@ -308,7 +311,9 @@ async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", p
 
             # --- commentsAuthors part: resolve or create author id ---
             if authors_name in entries:
-                aroot = etree.fromstring(entries[authors_name])
+                aroot = _safe_etree_fromstring(entries[authors_name], context=authors_name)
+                if aroot is None:
+                    aroot = etree.Element("{%s}cmAuthorLst" % _P14_NS)
             else:
                 aroot = etree.Element("{%s}cmAuthorLst" % _P14_NS)
 
@@ -364,7 +369,11 @@ async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", p
             ce_author.text = author_id
 
             # --- [Content_Types].xml: add overrides if missing ---
-            ct_root = etree.fromstring(entries["[Content_Types].xml"])
+            ct_root = _safe_etree_fromstring(entries["[Content_Types].xml"], context="[Content_Types].xml")
+            if ct_root is None:
+                # Rebuild minimal [Content_Types].xml — better than losing the
+                # entire content-type table on a single bad XML read.
+                ct_root = etree.Element("{%s}Types" % _CT_NS, nsmap={None: _CT_NS})
             has_authors_ct = any(
                 el.tag == "{%s}Override" % _CT_NS and el.get("PartName") == "/ppt/commentsAuthors.xml"
                 for el in ct_root
@@ -384,7 +393,9 @@ async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", p
 
             # --- slide rels: add commentsModern relationship ---
             if rels_name in entries:
-                rroot = etree.fromstring(entries[rels_name])
+                rroot = _safe_etree_fromstring(entries[rels_name], context=rels_name)
+                if rroot is None:
+                    rroot = etree.Element("{%s}Relationships" % _PKG_REL_NS, nsmap={None: _PKG_REL_NS})
             else:
                 rroot = etree.Element("{%s}Relationships" % _PKG_REL_NS, nsmap={None: _PKG_REL_NS})
             max_rid = 0
@@ -410,7 +421,12 @@ async def add_comment(self, file_id: str, text: str, author: str = "Reviewer", p
                 rel_el.set("Target", target)
 
             # --- slide XML: attach commentRel extension ---
-            sroot = etree.fromstring(entries[slide_name])
+            sroot = _safe_etree_fromstring(entries[slide_name], context=slide_name)
+            if sroot is None:
+                raise ValueError(
+                    f"Could not parse slide XML '{slide_name}' — refusing to "
+                    "overwrite a slide whose structure we cannot read."
+                )
             extLst = None
             for child in sroot:
                 if child.tag == "{%s}extLst" % _P_NS:
