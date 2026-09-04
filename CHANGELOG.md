@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.4fix-1] - 2026-09-04 — DATA_DIR resolution + safe OPC parser
+
+Fixes two bugs reported against v4.0.4 in the standard Open WebUI Docker image:
+
+### Bug 1: `unable to open database file` / `No path for file_id <uuid>`
+
+- **Symptom**: every file lookup returns `No path for file_id <uuid>`, `auto_backup` fails, `tool_stats` returns 0 tools, `import_*` actions fail.
+- **Root cause**: `_get_owui_data_dir()` consulted only the legacy `OPEN_WEBUI_DATA_DIR` env var (a custom var the user has to set). The canonical upstream env var `DATA_DIR` (defined in `open_webui/env.py:222`, default `/app/backend/data`) was ignored. When the env var is unset (default Docker image), `_get_owui_data_dir()` falls back to a userspace path that does not exist inside the container, so `sqlite3.connect(_DB_PATH)` fails, every DB lookup returns None, and reads cascade into `No path for file_id`.
+- **Fix**: new `_candidate_owui_data_dirs()` enumerates candidates in priority order — `DATA_DIR` (and `DATA_DIR/data`) → `OPEN_WEBUI_DATA_DIR` (legacy) → `/app/backend/data` → `/data` → userspace (`~/.open-webui/data` on Linux, AppData on Windows, `~/Library` on macOS). `_get_owui_data_dir()` returns the first existing directory. Module-level `_DB_PATH` and `_UPLOAD_DIR` resolution keeps the legacy `OPEN_WEBUI_DATA_DIR` fast path for backward-compat, then falls back to the candidate chain.
+
+### Bug 2: `ParseError: bad input at 1:0` in `add_comment`
+
+- **Symptom**: `add_comment` action crashes with `lxml.etree.XMLSyntaxError: Document is empty, line 1, column 0` (or `bad input at 1:0`) when the OPC ZIP contains a fresh `ppt/comments/modernComment_*.xml` part with empty bytes, or when the bytes are NUL-padded/non-UTF8.
+- **Root cause**: 5 `etree.fromstring(entries[X])` call sites in `add_comment` parsed OPC parts directly without handling empty bytes or alternative encodings. lxml surfaces the cryptic `bad input at 1:0` and aborts the entire add_comment operation.
+- **Fix**: new `_safe_etree_fromstring(blob, context)` helper:
+  - Returns `None` for `None`, empty bytes, or whitespace-only bytes (no exception)
+  - Decodes bytes via a tolerant cascade: `utf-8-sig → utf-8 → utf-16 → latin-1` (the utf-8-sig codec also strips a leading BOM, `\xef\xbb\xbf`). NUL-padded bytes that fail utf-8 produce a string with embedded NULs that lxml rejects, so the cascade moves on; if all four decoders produce a string that lxml still rejects, the function returns `None`.
+  - Catches any lxml exception, logs `[edit_office] Parse failed in {context}: {exc}`, returns `None`
+  - Never raises
+
+  All 5 unsafe call sites replaced with `_safe_etree_fromstring(entries.get(X), context=X)`. When the result is `None`, the caller creates a fresh `etree.Element(<root-tag>)` so the rest of the function can iterate children. **Exception**: the slide XML (`entries[slide_name]`) refuses to silently fallback — if we can't parse the slide we're about to overwrite, raise a clear `ValueError` instead of clobbering it with an empty document.
+
+### Files changed
+- `tool.py` (root) — all changes above
+- `src/constants.py` — added `_candidate_owui_data_dirs()` (already shipped in `b4852a9`)
+- `src/utils.py` — added `_safe_etree_fromstring()` (already shipped in `b4852a9`)
+- `src/office_comments.py` — 5 unsafe call sites replaced (already shipped in `b4852a9`)
+
+### Tested
+- 8/8 unit tests on `_safe_etree_fromstring`: empty bytes, None, NUL-padded, garbage bytes, whitespace, valid UTF-8 (with multi-byte chars), valid UTF-16, valid latin-1, pre-parsed Element passthrough.
+- `auto_backup()` runs end-to-end inside the official `open-webui-custom:latest` container and creates a timestamped backup in `/app/backend/data/backups/`.
+- `tool_stats()` reports the correct tool/function/model counts.
+- ZIP-parse flow (5 scenarios × 4 OPC parts) — 0 raises, 20/20 graceful `None` returns.
+
 ## [4.0.4] - 2026-08-28
 
 ### Fixed

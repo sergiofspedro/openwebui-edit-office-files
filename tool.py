@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 4.0.4
+version: 4.0.4fix-1
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -57,54 +57,201 @@ def _validate_outbound_url(url: str) -> Optional[str]:
     return None
 
 
-def _get_owui_data_dir() -> str:
-    """Return the Open WebUI data directory for the current OS."""
-    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
+def _candidate_owui_data_dirs() -> list[str]:
+    """Return a list of candidate Open WebUI data directories, in priority order.
+
+    Only directories that *might* exist are returned. The first one that exists
+    (and contains webui.db, or is writable) is used by the callers.
+
+    v4.0.4fix-1: added ``DATA_DIR`` (canonical upstream Open WebUI env var,
+    defined in ``open_webui/env.py:222``) and the Docker default
+    (``/app/backend/data``) to the resolution chain. The legacy
+    ``OPEN_WEBUI_DATA_DIR`` plugin-only env var is kept for backward
+    compatibility with older deployments.
+    """
+    candidates: list[str] = []
+
+    # 1. Canonical OWUI env var
+    data_dir = os.environ.get("DATA_DIR", "").strip()
     if data_dir:
-        return data_dir
+        candidates.append(data_dir)
+
+    # 2. Legacy plugin-only env var
+    legacy = os.environ.get("OPEN_WEBUI_DATA_DIR", "").strip()
+    if legacy and legacy not in candidates:
+        candidates.append(legacy)
+
+    # 3. Official OWUI Docker default (upstream Dockerfile creates this).
+    # Add unconditionally; the caller's os.path.isdir() check filters it out on
+    # non-Docker hosts.
+    if "/app/backend/data" not in candidates:
+        candidates.append("/app/backend/data")
+
+    # 4. Common bind-mount path
+    if "/data" not in candidates:
+        candidates.append("/data")
+
+    # 5. OS-specific userspace fallback
     home = os.path.expanduser("~")
     system = platform.system()
     if system == "Windows":
-        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data")
-    if system == "Darwin":
-        return os.path.join(home, "Library", "Application Support", "open-webui", "data")
-    # Linux
-    xdg_data_home = os.environ.get("XDG_DATA_HOME", "")
-    if xdg_data_home:
-        return os.path.join(xdg_data_home, "open-webui", "data")
-    return os.path.join(home, ".open-webui", "data")
+        candidates.append(os.path.join(os.environ.get("APPDATA", home), "open-webui", "data"))
+    elif system == "Darwin":
+        candidates.append(os.path.join(home, "Library", "Application Support", "open-webui", "data"))
+    else:  # Linux / Unix
+        xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+        if xdg_data_home:
+            candidates.append(os.path.join(xdg_data_home, "open-webui", "data"))
+        candidates.append(os.path.join(home, ".open-webui", "data"))
+
+    return candidates
+
+
+def _safe_etree_fromstring(blob, context: str = "<unknown>"):
+    """Parse an XML blob defensively, returning ``None`` on any failure.
+
+    Replaces bare ``lxml.etree.fromstring(blob)`` calls that previously raised
+    ``lxml.etree.XMLSyntaxError: Document is empty`` or the cryptic
+    ``ParseError: bad input at 1:0`` whenever an OPC part inside a PPTX is
+    empty, BOM-prefixed, or in a non-UTF-8 encoding (e.g. UTF-16 from a
+    third-party authoring tool, or bytes that lxml cannot sniff).
+
+    Resolution order:
+        1. ``None``/empty input -> ``None`` (with stderr note).
+        2. Already a parsed element -> return as-is.
+        3. ``bytes`` → try ``utf-8-sig`` first, then ``utf-8``, then ``utf-16``,
+           then ``latin-1`` (latin-1 always succeeds, masking unrecoverable
+           input as ``None`` if lxml still rejects it).
+        4. ``str`` passed directly to ``lxml.etree.fromstring``.
+
+    On any failure path the function logs a single ``[office]`` line to stderr
+    and returns ``None``. Callers are expected to handle ``None`` as "this
+    part is missing or unrecoverable" and proceed.
+    """
+    if blob is None:
+        print(f"[office] Empty XML blob in {context}", file=sys.stderr)
+        return None
+
+    # If lxml already returned an Element (some upstream helpers do), pass it through.
+    try:
+        from lxml import etree as _et
+        if hasattr(blob, "tag") and hasattr(blob, "get"):
+            return blob
+    except Exception:
+        pass
+
+    raw = blob
+    # Normalize bytes → str with a tolerant decoder cascade.
+    if isinstance(raw, (bytes, bytearray)):
+        if len(raw) == 0:
+            print(f"[office] Empty XML blob in {context}", file=sys.stderr)
+            return None
+        # Try UTF-8 first (canonical for OPC packages), then UTF-16 (some
+        # third-party Office tools emit UTF-16 inside the ZIP), then latin-1
+        # as a last-resort fallback. latin-1 always decodes, so any failure
+        # past this point is an XML syntax error.
+        last_exc: Exception | None = None
+        for enc in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
+            try:
+                decoded = raw.decode(enc)
+            except Exception:
+                continue
+            try:
+                from lxml import etree as _et
+                # Pass bytes through directly so lxml auto-detects the BOM
+                # and encoding declaration rather than getting confused by our
+                # own re-encoding.
+                return _et.fromstring(decoded.encode("utf-8") if enc != "utf-16" else raw)
+            except Exception as exc:
+                # Save the last exception for logging, but try the next encoding.
+                last_exc = exc
+                continue
+        # All decodings produced something but lxml rejected every form.
+        print(
+            f"[office] Parse failed in {context}: {last_exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    if isinstance(raw, str):
+        if not raw.strip():
+            print(f"[office] Empty XML blob in {context}", file=sys.stderr)
+            return None
+        try:
+            from lxml import etree as _et
+            return _et.fromstring(raw)
+        except Exception as exc:
+            print(
+                f"[office] Parse failed in {context}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+    # Unknown type — bail out cleanly.
+    print(
+        f"[office] Unsupported blob type {type(raw).__name__} in {context}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _get_owui_data_dir() -> str:
+    """Return the Open WebUI data directory for the current OS.
+
+    Resolution order (first hit wins):
+        1. ``DATA_DIR`` env var (canonical OWUI, upstream ``env.py:222``)
+        2. ``OPEN_WEBUI_DATA_DIR`` env var (legacy plugin-only)
+        3. ``/app/backend/data`` (official OWUI Docker default)
+        4. ``/data`` (common bind-mount)
+        5. OS-specific userspace fallback
+
+    A directory is "good" if it exists. The first existing candidate is returned.
+    If none exist, the userspace path is returned so that callers can still attempt
+    operations and surface a meaningful error (preserves legacy behaviour).
+    """
+    candidates = _candidate_owui_data_dirs()
+    for d in candidates:
+        if d and os.path.isdir(d):
+            return d
+    # None exist — fall back to last candidate (userspace path) to preserve
+    # old behaviour for fresh installs. The caller will get a clean error.
+    return candidates[-1] if candidates else os.path.expanduser("~")
+
 
 def _get_owui_uploads_dir() -> str:
-    """Return the Open WebUI uploads directory for the current OS."""
-    data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
-    if data_dir:
-        return os.path.join(data_dir, "data", "uploads")
-    home = os.path.expanduser("~")
-    system = platform.system()
-    if system == "Windows":
-        return os.path.join(os.environ.get("APPDATA", home), "open-webui", "data", "uploads")
-    if system == "Darwin":
-        return os.path.join(home, "Library", "Application Support", "open-webui", "data", "uploads")
-    # Linux
-    xdg_data_home = os.environ.get("XDG_DATA_HOME", "")
-    if xdg_data_home:
-        return os.path.join(xdg_data_home, "open-webui", "data", "uploads")
-    return os.path.join(home, ".open-webui", "data", "uploads")
+    """Return the Open WebUI uploads directory for the current OS.
+
+    The uploads directory is conventionally ``${DATA_DIR}/uploads`` in upstream
+    OWUI (env.py:222, DATA_DIR + `/uploads`). For backwards compatibility, we
+    preserve the legacy ``${OPEN_WEBUI_DATA_DIR}/data/uploads`` layout for
+    deployments that explicitly set the legacy env var.
+    """
+    # 1. Legacy env var fast path — preserve old layout
+    legacy = os.environ.get("OPEN_WEBUI_DATA_DIR", "").strip()
+    if legacy:
+        return os.path.join(legacy, "data", "uploads")
+
+    # 2. Same resolved data dir + `/uploads` (DATA_DIR/uploads upstream convention)
+    data_dir = _get_owui_data_dir()
+    return os.path.join(data_dir, "uploads")
+
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
-if _data_dir:
-    _DB_PATH = os.path.join(_data_dir, "data", "webui.db")
+# Module-level path resolution. Keep the legacy `OPEN_WEBUI_DATA_DIR` fast path
+# so users who explicitly set it always get `<env>/data/webui.db` (backward
+# compat). Otherwise, resolve through the candidate chain (`_get_owui_data_dir`)
+# which consults upstream `DATA_DIR` first, then the Docker default
+# `/app/backend/data`, etc.
+_legacy_data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "").strip()
+if _legacy_data_dir:
+    _DB_PATH = os.path.join(_legacy_data_dir, "data", "webui.db")
 else:
     _DB_PATH = os.path.join(_get_owui_data_dir(), "webui.db")
 
-_data_dir = os.environ.get("OPEN_WEBUI_DATA_DIR", "")
-if _data_dir:
-    _UPLOAD_DIR = os.path.join(_data_dir, "data", "uploads")
-else:
-    _UPLOAD_DIR = _get_owui_uploads_dir()
+_data_dir = _get_owui_data_dir()
+_UPLOAD_DIR = _get_owui_uploads_dir()
 
 _EXPORT_DIR = os.environ.get("OWUI_EXPORTS_DIR", os.path.join(os.path.expanduser("~"), "open-webui", "exports"))
 
@@ -121,6 +268,7 @@ _CT_MODERN = "application/vnd.ms-office.presentation.commentsModern"
 _CT_AUTHORS = "application/vnd.ms-office.presentation.commentsAuthors"
 
 __all__ = [
+    "_safe_etree_fromstring", "_candidate_owui_data_dirs",
     "_get_owui_data_dir", "_get_owui_uploads_dir",
     "_data_dir", "_DB_PATH", "_UPLOAD_DIR", "_EXPORT_DIR",
     "_P_NS", "_P14_NS", "_R_NS", "_PKG_REL_NS", "_CT_NS",
@@ -1145,6 +1293,13 @@ class Tools:
         code never looks at, and the returned link 401'd/404'd. It was also silently broken
         on any S3/GCS/Azure-backed deployment (`STORAGE_PROVIDER` env var), since those
         require `file.path` to be a Storage URI, not a local filesystem path.
+
+        v4.0.4fix-1: the data-dir resolution chain (`_candidate_owui_data_dirs`) now also
+        consults upstream `DATA_DIR` (canonical, `open_webui/env.py:222`, default
+        `/app/backend/data`) before falling back to the legacy `OPEN_WEBUI_DATA_DIR`
+        env var and the OS-specific userspace path. This fixes the
+        `No path for file_id <uuid>` / `unable to open database file` errors on stock
+        Docker installs where neither env var was set.
 
         This now calls the exact same sequence Open WebUI's own upload endpoint uses
         (`routers/files.py:upload_file_handler`): `Storage.upload_file()` (blocking, so run
@@ -6080,7 +6235,10 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
                 # --- modern comment part: compute next comment idx ---
                 if modern_name in entries:
-                    mroot = etree.fromstring(entries[modern_name])
+                    mroot = _safe_etree_fromstring(entries.get(modern_name), context=modern_name)
+                    if mroot is None:
+                        # Could not parse existing modern comments — start fresh
+                        mroot = etree.Element("{%s}cmLst" % _P_NS)
                     max_idx = 0
                     for el in mroot:
                         if el.tag == "{%s}cm" % _P_NS:
@@ -6095,7 +6253,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
                 # --- commentsAuthors part: resolve or create author id ---
                 if authors_name in entries:
-                    aroot = etree.fromstring(entries[authors_name])
+                    aroot = _safe_etree_fromstring(entries.get(authors_name), context=authors_name)
+                    if aroot is None:
+                        aroot = etree.Element("{%s}cmAuthorLst" % _P14_NS)
                 else:
                     aroot = etree.Element("{%s}cmAuthorLst" % _P14_NS)
 
@@ -6151,7 +6311,11 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                 ce_author.text = author_id
 
                 # --- [Content_Types].xml: add overrides if missing ---
-                ct_root = etree.fromstring(entries["[Content_Types].xml"])
+                ct_root = _safe_etree_fromstring(entries.get("[Content_Types].xml"), context="[Content_Types].xml")
+                if ct_root is None:
+                    # Rebuild minimal [Content_Types].xml — better than losing the
+                    # entire content-type table on a single bad XML read.
+                    ct_root = etree.Element("{%s}Types" % _CT_NS, nsmap={None: _CT_NS})
                 has_authors_ct = any(
                     el.tag == "{%s}Override" % _CT_NS and el.get("PartName") == "/ppt/commentsAuthors.xml"
                     for el in ct_root
@@ -6171,7 +6335,9 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
 
                 # --- slide rels: add commentsModern relationship ---
                 if rels_name in entries:
-                    rroot = etree.fromstring(entries[rels_name])
+                    rroot = _safe_etree_fromstring(entries.get(rels_name), context=rels_name)
+                    if rroot is None:
+                        rroot = etree.Element("{%s}Relationships" % _PKG_REL_NS, nsmap={None: _PKG_REL_NS})
                 else:
                     rroot = etree.Element("{%s}Relationships" % _PKG_REL_NS, nsmap={None: _PKG_REL_NS})
                 max_rid = 0
@@ -6197,7 +6363,12 @@ blockquote { border-left: 4px solid #e94560; margin: 20px 0; padding: 10px 20px;
                     rel_el.set("Target", target)
 
                 # --- slide XML: attach commentRel extension ---
-                sroot = etree.fromstring(entries[slide_name])
+                sroot = _safe_etree_fromstring(entries.get(slide_name), context=slide_name)
+                if sroot is None:
+                    raise ValueError(
+                        f"Could not parse slide XML '{slide_name}' — refusing to "
+                        "overwrite a slide whose structure we cannot read."
+                    )
                 extLst = None
                 for child in sroot:
                     if child.tag == "{%s}extLst" % _P_NS:
