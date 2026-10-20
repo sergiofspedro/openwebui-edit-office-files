@@ -3,7 +3,7 @@ title: Edit Office Files
 author: giofsp
 author_url: https://github.com/sergiofspedro
 description: Unified tool to read, edit, and create Office files (.xlsx, .xls, .docx, .pptx) preserving original formatting and styles. Supports markdown rendering in DOCX (headings, bold, italic, code, links). Detects highlights, bold, italic formatting. Detects legacy .doc and .ppt. Note: Track changes are not supported. For 2+ comments on one file, use add_comments (not repeated add_comment calls).
-version: 4.0.5
+version: 4.0.6
 requirements: openpyxl, python-docx, python-pptx, xlrd, odfpy, docx-revisions, lxml, PyMuPDF, Pillow, pytesseract, qrcode, google-api-python-client, google-auth
 """
 
@@ -235,6 +235,13 @@ def _get_owui_uploads_dir() -> str:
     data_dir = _get_owui_data_dir()
     return os.path.join(data_dir, "uploads")
 
+def _clean_storage_filename(name: str) -> str:
+    """Strip Open WebUI's '<uuid>_' storage prefix from a filename, if present."""
+    m = re.match(
+        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}_(.+)$",
+        name,
+    )
+    return m.group(1) if m else name
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -275,13 +282,31 @@ __all__ = [
     "_CM_REL_TYPE", "_CT_MODERN", "_CT_AUTHORS",
 ]
 
+# --- v4.0.6 fix: database backend handling -------------------------------
+_DB_BACKEND = "auto"
+
+
+def _set_db_backend(backend: str) -> None:
+    """Record the configured metadata-DB backend so the module-level file
+    resolvers can honor the valve (which lives on the Tools instance)."""
+    global _DB_BACKEND
+    _DB_BACKEND = (backend or "auto").strip().lower()
+
+
+def _get_db_backend() -> str:
+    return _DB_BACKEND
+
+
 def _resolve_file_path(file_id: str) -> Optional[str]:
     """Resolve an Open WebUI file UUID to an absolute disk path.
 
-    v4.0.4 (#12): returns None (instead of raising) when the metadata DB is
-    not SQLite — e.g. PostgreSQL deployments where ``?mode=ro`` is rejected.
-    Callers treat None as "file not found" and degrade gracefully.
+    v4.0.6 fix: honors the `database_backend` valve and never gives up on the
+    local filesystem. On PostgreSQL deployments (or when the SQLite DB is
+    unavailable), the SQLite lookup is skipped / fails gracefully and the file
+    is resolved purely from the uploads directory, where Open WebUI stores
+    files as "<uuid>_<original_filename>".
     """
+
     def _lookup(sql: str, params: tuple) -> Optional[str]:
         """Run a read-only lookup; return the path column or None on failure."""
         try:
@@ -295,39 +320,47 @@ def _resolve_file_path(file_id: str) -> Optional[str]:
             print(f"[office] DB lookup failed for {file_id}: {exc}", file=sys.stderr)
             return None
 
-    row_path = _lookup(
-        "SELECT path FROM file WHERE id = ?", (file_id,)
-    )
-    if not row_path:
-        # Fallback: try by filename
-        row_path = _lookup(
-            "SELECT path FROM file WHERE filename LIKE ?",
-            (f"%{file_id}%",),
+    row_path = None
+    if _get_db_backend() != "postgres":
+        row_path = _lookup("SELECT path FROM file WHERE id = ?", (file_id,))
+        if not row_path:
+            row_path = _lookup(
+                "SELECT filename FROM file WHERE filename LIKE ?",
+                (f"%{file_id}%",),
+            )
+    else:
+        print(
+            f"[office] database_backend=postgres: skipping SQLite lookup for {file_id}",
+            file=sys.stderr,
         )
 
-    if not row_path:
-        print(f"[office] No path for file_id {file_id}", file=sys.stderr)
-        return None
+    # 1. DB gave us a real on-disk path -> use it directly.
+    if row_path and os.path.isfile(row_path):
+        return row_path
 
-    path = row_path
-    if os.path.isfile(path):
-        return path
+    # 2. DB gave us a path that isn't on disk -> try it inside the uploads dir.
+    if row_path:
+        candidate = os.path.join(_UPLOAD_DIR, os.path.basename(row_path))
+        if os.path.isfile(candidate):
+            return candidate
 
-    # Fallback: uploads directory
-    candidate = os.path.join(_UPLOAD_DIR, os.path.basename(path))
-    if os.path.isfile(candidate):
-        return candidate
-
-    # Last resort: UUID prefix match in uploads
-    prefix = file_id.split("-")[0] if "-" in file_id else file_id[:8]
+    # 3. Filesystem-only resolution (works for postgres + local storage).
+    #    Open WebUI stores uploads as "<uuid>_<original_filename>".
     if os.path.isdir(_UPLOAD_DIR):
+        # 3a. Exact filename match (file_id may be the plain filename).
+        direct = os.path.join(_UPLOAD_DIR, file_id)
+        if os.path.isfile(direct):
+            return direct
+
+        # 3b. UUID prefix match.
+        prefix = file_id.split("-")[0] if "-" in file_id else file_id[:8]
         for name in os.listdir(_UPLOAD_DIR):
             if name.startswith(prefix):
                 candidate = os.path.join(_UPLOAD_DIR, name)
                 if os.path.isfile(candidate):
                     return candidate
 
-    print(f"[office] File not found on disk: {path}", file=sys.stderr)
+    print(f"[office] File not found on disk: {file_id}", file=sys.stderr)
     return None
 
 
@@ -1146,13 +1179,14 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+        _set_db_backend(self.valves.database_backend)   # <-- add this line
 
     def _resolve_file(self, file_id: str):
         """Resolve a file ID to (bytes, filename, file_type)."""
         path = _resolve_file_path(file_id)
         if not path:
             return None, None, None
-        filename = os.path.basename(path)
+        filename = _clean_storage_filename(os.path.basename(path))
         ftype = _detect_type(filename)
         if ftype == "unknown":
             # Files this tool itself creates via _save_and_link are stored on disk under
@@ -1434,27 +1468,17 @@ class Tools:
                 page_start to continue through a long PDF.
         """
         try:
-            file_data = _read_file_bytes(file_id)
-            if file_data is None:
-                return json.dumps({
-                    "error": (
-                        f"Could not read file {file_id}. "
-                        "Make sure the file was uploaded via the chat."
-                    )
-                })
-
-            # Detect type from filename in DB
-            try:
-                conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-                row = conn.execute(
-                    "SELECT filename FROM file WHERE id = ?", (file_id,)
-                ).fetchone()
-                conn.close()
-                filename = _decode_filename(row[0]) if row and row[0] else file_id
-            except Exception:
-                filename = file_id
-
-            file_type = _detect_type(filename)
+            file_bytes, filename, file_type = self._resolve_file(file_id)
+            if not file_bytes:
+                return json.dumps(
+                    {
+                        "error": (
+                            f"Could not read file {file_id}. "
+                            "Make sure the file was uploaded via the chat."
+                        )
+                    }
+                )
+            file_data = file_bytes
             result: Dict[str, Any] = {
                 "file_id": file_id,
                 "filename": filename,
@@ -1694,22 +1718,10 @@ class Tools:
             output_filename: Optional output filename
         """
         try:
-            file_data = _read_file_bytes(file_id)
-            if file_data is None:
+            file_bytes, filename, file_type = self._resolve_file(file_id)
+            if not file_bytes:
                 return json.dumps({"error": f"Could not read file {file_id}"})
-
-            # Detect type
-            try:
-                conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-                row = conn.execute(
-                    "SELECT filename FROM file WHERE id = ?", (file_id,)
-                ).fetchone()
-                conn.close()
-                filename = _decode_filename(row[0]) if row and row[0] else file_id
-            except Exception:
-                filename = file_id
-
-            file_type = _detect_type(filename)
+            file_data = file_bytes
             out = io.BytesIO()
             out_name = output_filename
 
@@ -1927,22 +1939,10 @@ class Tools:
             output_filename: Optional output filename
         """
         try:
-            file_data = _read_file_bytes(file_id)
-            if file_data is None:
+            file_bytes, filename, file_type = self._resolve_file(file_id)
+            if not file_bytes:
                 return json.dumps({"error": f"Could not read file {file_id}"})
-
-            # Detect type
-            try:
-                conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-                row = conn.execute(
-                    "SELECT filename FROM file WHERE id = ?", (file_id,)
-                ).fetchone()
-                conn.close()
-                filename = _decode_filename(row[0]) if row and row[0] else file_id
-            except Exception:
-                filename = file_id
-
-            file_type = _detect_type(filename)
+            file_data = file_bytes
             out = io.BytesIO()
             out_name = output_filename
             count = 0
@@ -2106,21 +2106,10 @@ class Tools:
             output_filename: Optional output filename
         """
         try:
-            file_data = _read_file_bytes(file_id)
-            if file_data is None:
+            file_bytes, filename, file_type = self._resolve_file(file_id)
+            if not file_bytes:
                 return json.dumps({"error": f"Could not read file {file_id}"})
-
-            try:
-                conn2 = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-                row2 = conn2.execute(
-                    "SELECT filename FROM file WHERE id = ?", (file_id,)
-                ).fetchone()
-                conn2.close()
-                filename = _decode_filename(row2[0]) if row2 and row2[0] else file_id
-            except Exception:
-                filename = file_id
-
-            file_type = _detect_type(filename)
+            file_data = file_bytes
             if file_type not in ("xlsx", "xls"):
                 return json.dumps({"error": f"Unsupported type: {file_type}. Only xlsx/xls supported."})
 
@@ -2254,21 +2243,10 @@ class Tools:
             output_filename: Optional output filename
         """
         try:
-            file_data = _read_file_bytes(file_id)
-            if file_data is None:
+            file_bytes, filename, file_type = self._resolve_file(file_id)
+            if not file_bytes:
                 return json.dumps({"error": f"Could not read file {file_id}"})
-
-            try:
-                conn2 = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-                row2 = conn2.execute(
-                    "SELECT filename FROM file WHERE id = ?", (file_id,)
-                ).fetchone()
-                conn2.close()
-                filename = _decode_filename(row2[0]) if row2 and row2[0] else file_id
-            except Exception:
-                filename = file_id
-
-            file_type = _detect_type(filename)
+            file_data = file_bytes
             if file_type not in ("xlsx", "xls"):
                 return json.dumps({"error": f"Unsupported type: {file_type}. Only xlsx/xls supported."})
 
@@ -2341,21 +2319,10 @@ class Tools:
             output_filename: Optional output filename
         """
         try:
-            file_data = _read_file_bytes(file_id)
-            if file_data is None:
+            file_bytes, filename, file_type = self._resolve_file(file_id)
+            if not file_bytes:
                 return json.dumps({"error": f"Could not read file {file_id}"})
-
-            try:
-                conn2 = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
-                row2 = conn2.execute(
-                    "SELECT filename FROM file WHERE id = ?", (file_id,)
-                ).fetchone()
-                conn2.close()
-                filename = _decode_filename(row2[0]) if row2 and row2[0] else file_id
-            except Exception:
-                filename = file_id
-
-            file_type = _detect_type(filename)
+            file_data = file_bytes
             if file_type not in ("xlsx", "docx"):
                 return json.dumps({"error": f"Unsupported type: {file_type}. Only xlsx and docx supported."})
 
@@ -3735,24 +3702,11 @@ class Tools:
         author: Name shown in Word's Track Changes (e.g., "Sergio Pedro")
         """
         try:
-            import sqlite3 as s3
-            conn2 = s3.connect(_DB_PATH)
-            try:
-                row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
-                if not row:
-                    row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
-                if not row:
-                    return json.dumps({"error": self._err("file_not_found")})
-                filename = _decode_filename(row[0]) if row[0] else row[0]
-                meta = json.loads(row[1]) if row[1] else {}
-                data = _read_file_bytes(meta.get("path", file_id))
-                if not data:
-                    return json.dumps({"error": "File not found on disk"})
-            finally:
-                conn2.close()
+            data, filename, ftype = self._resolve_file(file_id)
+            if not data:
+                return json.dumps({"error": self._err("file_not_found")})
 
             # Check file type — track changes only supported for DOCX
-            ftype = _detect_type(filename)
             if ftype != "docx":
                 return json.dumps({"error": f"Track changes are only supported for DOCX files. {ftype.upper()} format does not support revision marks."})
 
@@ -3818,55 +3772,44 @@ class Tools:
             output_filename: Optional output filename (default "merged_workbook.xlsx")
         """
         try:
-            import sqlite3 as s3, openpyxl, io, os
+            import openpyxl, io, os
             from copy import copy
-            conn2 = s3.connect(_DB_PATH)
-            try:
-                ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
-                wb_out = openpyxl.Workbook()
-                wb_out.remove(wb_out.active)
-                merged = 0
-                for fid in ids:
-                    row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (fid,)).fetchone()
-                    if not row:
-                        row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
-                    if not row:
-                        continue
-                    filename = _decode_filename(row[0]) if row[0] else row[0]
-                    meta = json.loads(row[1]) if row[1] else {}
-                    data = _read_file_bytes(meta.get("path", fid))
-                    if not data:
-                        continue
-                    wb_src = openpyxl.load_workbook(io.BytesIO(data))
-                    base_name = os.path.splitext(os.path.basename(filename))[0][:15]
-                    for sn in wb_src.sheetnames:
-                        ws_src = wb_src[sn]
-                        sheet_name = (base_name + "_" + sn)[:31]
-                        if sheet_name in wb_out.sheetnames:
-                            # Two source files truncating to the same 15-char base_name
-                            # (e.g. "Quarterly_Report_2023.xlsx" / "...2024.xlsx" both
-                            # become "Quarterly_Repor") would otherwise collide -- Excel
-                            # sheet names must be unique, so disambiguate with a suffix
-                            # instead of letting a later sheet silently overwrite an
-                            # earlier one under the same name.
-                            suffix = 2
-                            while f"{sheet_name[:29]}_{suffix}" in wb_out.sheetnames:
-                                suffix += 1
-                            sheet_name = f"{sheet_name[:29]}_{suffix}"
-                        ws_out = wb_out.create_sheet(title=sheet_name)
-                        for ri, row_data in enumerate(ws_src.iter_rows(), 1):
-                            for ci, cell in enumerate(row_data, 1):
-                                out_cell = ws_out.cell(row=ri, column=ci, value=cell.value)
-                                if cell.has_style:
-                                    out_cell.font = copy(cell.font)
-                                    out_cell.fill = copy(cell.fill)
-                                    out_cell.border = copy(cell.border)
-                                    out_cell.alignment = copy(cell.alignment)
-                                    out_cell.number_format = cell.number_format
-                        merged += 1
-                    wb_src.close()
-            finally:
-                conn2.close()
+            ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
+            wb_out = openpyxl.Workbook()
+            wb_out.remove(wb_out.active)
+            merged = 0
+            for fid in ids:
+                data, filename, ftype = self._resolve_file(fid)
+                if not data:
+                    continue
+                wb_src = openpyxl.load_workbook(io.BytesIO(data))
+                base_name = os.path.splitext(os.path.basename(filename))[0][:15]
+                for sn in wb_src.sheetnames:
+                    ws_src = wb_src[sn]
+                    sheet_name = (base_name + "_" + sn)[:31]
+                    if sheet_name in wb_out.sheetnames:
+                        # Two source files truncating to the same 15-char base_name
+                        # (e.g. "Quarterly_Report_2023.xlsx" / "...2024.xlsx" both
+                        # become "Quarterly_Repor") would otherwise collide -- Excel
+                        # sheet names must be unique, so disambiguate with a suffix
+                        # instead of letting a later sheet silently overwrite an
+                        # earlier one under the same name.
+                        suffix = 2
+                        while f"{sheet_name[:29]}_{suffix}" in wb_out.sheetnames:
+                            suffix += 1
+                        sheet_name = f"{sheet_name[:29]}_{suffix}"
+                    ws_out = wb_out.create_sheet(title=sheet_name)
+                    for ri, row_data in enumerate(ws_src.iter_rows(), 1):
+                        for ci, cell in enumerate(row_data, 1):
+                            out_cell = ws_out.cell(row=ri, column=ci, value=cell.value)
+                            if cell.has_style:
+                                out_cell.font = copy(cell.font)
+                                out_cell.fill = copy(cell.fill)
+                                out_cell.border = copy(cell.border)
+                                out_cell.alignment = copy(cell.alignment)
+                                out_cell.number_format = cell.number_format
+                    merged += 1
+                wb_src.close()
             if merged == 0:
                 return json.dumps({"error": "No files could be merged"})
             out = io.BytesIO()
@@ -3974,28 +3917,18 @@ class Tools:
             output_filename: Optional output filename (default "merged.pdf")
         """
         try:
-            import fitz, sqlite3 as s3, io, os
-            conn2 = s3.connect(_DB_PATH)
-            try:
-                ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
-                merger = fitz.open()
-                count = 0
-                for fid in ids:
-                    row = conn2.execute("SELECT meta FROM file WHERE id=?", (fid,)).fetchone()
-                    if not row:
-                        row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+fid+"%",)).fetchone()
-                    if not row:
-                        continue
-                    meta = json.loads(row[0]) if row[0] else {}
-                    data = _read_file_bytes(meta.get("path", fid))
-                    if not data:
-                        continue
-                    src = fitz.open(stream=data, filetype="pdf")
-                    merger.insert_pdf(src)
-                    src.close()
-                    count += 1
-            finally:
-                conn2.close()
+            import fitz, io, os
+            ids = [fid.strip() for fid in file_ids.split(",") if fid.strip()]
+            merger = fitz.open()
+            count = 0
+            for fid in ids:
+                data, filename, ftype = self._resolve_file(fid)
+                if not data:
+                    continue
+                src = fitz.open(stream=data, filetype="pdf")
+                merger.insert_pdf(src)
+                src.close()
+                count += 1
             if count == 0:
                 merger.close()
                 return json.dumps({"error": "No PDFs could be merged"})
@@ -4019,20 +3952,10 @@ class Tools:
         Complement of merge_pdfs() -- use that to combine files back together.
         """
         try:
-            import fitz, sqlite3 as s3, io, os
-            conn2 = s3.connect(_DB_PATH)
-            try:
-                row = conn2.execute("SELECT meta FROM file WHERE id=?", (file_id,)).fetchone()
-                if not row:
-                    row = conn2.execute("SELECT meta FROM file WHERE filename LIKE ?", ("%"+file_id+"%",)).fetchone()
-                if not row:
-                    return json.dumps({"error": self._err("file_not_found")})
-                meta = json.loads(row[0]) if row[0] else {}
-                data = _read_file_bytes(meta.get("path", file_id))
-                if not data:
-                    return json.dumps({"error": "File not found on disk"})
-            finally:
-                conn2.close()
+            import fitz, io, os
+            data, filename, ftype = self._resolve_file(file_id)
+            if not data:
+                return json.dumps({"error": self._err("file_not_found")})
             src = fitz.open(stream=data, filetype="pdf")
             total_pages = src.page_count
             urls = []
@@ -4137,24 +4060,11 @@ class Tools:
     async def manage_revisions(self, file_id: str, action: str, output_filename: str = "", __user__=None, __request__=None) -> str:
         """List, accept_all or reject_all tracked changes in a Word document."""
         try:
-            import sqlite3 as s3
-            conn2 = s3.connect(_DB_PATH)
-            try:
-                row = conn2.execute("SELECT filename, meta FROM file WHERE id=?", (file_id,)).fetchone()
-                if not row:
-                    row = conn2.execute("SELECT filename, meta FROM file WHERE filename LIKE ?", (f"%{file_id}%",)).fetchone()
-                if not row:
-                    return json.dumps({"error": self._err("file_not_found")})
-                filename = _decode_filename(row[0]) if row[0] else row[0]
-                meta = json.loads(row[1]) if row[1] else {}
-                data = _read_file_bytes(meta.get("path", file_id))
-                if not data:
-                    return json.dumps({"error": "File not found on disk"})
-            finally:
-                conn2.close()
+            data, filename, ftype = self._resolve_file(file_id)
+            if not data:
+                return json.dumps({"error": self._err("file_not_found")})
 
             # Check file type — revision management only supported for DOCX
-            ftype = _detect_type(filename)
             if ftype != "docx":
                 return json.dumps({"error": f"Revision management is only supported for DOCX files. {ftype.upper()} format does not support revision marks."})
 
